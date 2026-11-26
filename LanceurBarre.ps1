@@ -194,11 +194,16 @@ function Update-Layout {
     if ($right -le $tb.Left + $w -or $right -gt $tb.Right) { $right = $tb.Right - [int]($MargeDroite * $scale) }
     $x = $right - $w - [int](8 * $scale)
     $y = $tb.Top + [int](($tb.Height - $h) / 2)
+    $want = New-Object Drawing.Rectangle($x, $y, $w, $h)
     $key = "$x,$y,$w,$h,$($tb.Top)"
-    if ($key -eq $script:lay) { return }
+    if ($key -eq $script:lay) {
+        # Windows deplace parfois la fenetre tout seul (vers la zone de travail) : on la remet a sa place
+        if (-not $bar.Bounds.Equals($want)) { $bar.Bounds = $want; Write-Journal "Replacee (Windows l'avait deplacee)" }
+        return
+    }
     $script:lay = $key
     $script:tbTop = $tb.Top; $script:barX = $x
-    $bar.Bounds = New-Object Drawing.Rectangle($x, $y, $w, $h)
+    $bar.Bounds = $want
     # coins arrondis
     $r = [int](8 * $scale); $p = New-Object Drawing.Drawing2D.GraphicsPath
     $p.AddArc(0, 0, $r * 2, $r * 2, 180, 90); $p.AddArc($w - $r * 2, 0, $r * 2, $r * 2, 270, 90)
