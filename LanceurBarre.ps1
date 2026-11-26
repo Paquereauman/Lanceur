@@ -10,6 +10,14 @@ $MargeDroite = 290   # utilise seulement si la zone de l'horloge est introuvable
 $mutex = New-Object Threading.Mutex($false, 'Local\LanceurBarre')
 if (-not $mutex.WaitOne(0)) { exit }
 
+# Si on a quitte la barre volontairement, la tache de relance automatique ne la rouvre pas avant le prochain demarrage du PC
+$stopFlag = Join-Path $env:APPDATA 'Lanceur\arret_volontaire'
+if (Test-Path $stopFlag) {
+    $boot = (Get-CimInstance Win32_OperatingSystem).LastBootUpTime
+    if ((Get-Item $stopFlag).LastWriteTime -gt $boot -and $args -notcontains '-force') { exit }
+    Remove-Item $stopFlag -Force -ErrorAction SilentlyContinue
+}
+
 Add-Type -AssemblyName System.Windows.Forms, System.Drawing
 Add-Type -ReferencedAssemblies System.Windows.Forms, System.Drawing, System -TypeDefinition @'
 using System;
@@ -50,6 +58,14 @@ public class LanceurNative : NativeWindow {
         if (t == IntPtr.Zero || !GetWindowRect(t, out r)) return Rectangle.Empty;
         return Rectangle.FromLTRB(r.L, r.T, r.R, r.B);
     }
+    // Rattache la fenetre a la barre des taches : une fenetre "possedee" reste toujours au-dessus de son proprietaire,
+    // meme quand le menu Demarrer remet la barre des taches au premier plan.
+    [DllImport("user32.dll", EntryPoint = "SetWindowLongPtrW")] static extern IntPtr SetWindowLongPtr(IntPtr h, int i, IntPtr v);
+    [DllImport("user32.dll", EntryPoint = "GetWindowLongPtrW")] static extern IntPtr GetWindowLongPtr(IntPtr h, int i);
+    public static void AttachToTaskbar(IntPtr h) {
+        IntPtr t = FindWindow("Shell_TrayWnd", null);
+        if (t != IntPtr.Zero && GetWindowLongPtr(h, -8) != t) SetWindowLongPtr(h, -8, t);   // GWLP_HWNDPARENT
+    }
     // Bord gauche de la zone horloge / icones systeme (0 si introuvable)
     public static int TrayLeft() {
         IntPtr t = FindWindow("Shell_TrayWnd", null); if (t == IntPtr.Zero) return 0;
@@ -85,6 +101,20 @@ public static class LanceurIcon {
 '@
 [void][LanceurNative]::SetProcessDPIAware()
 [System.Windows.Forms.Application]::EnableVisualStyles()
+
+# Journal (demarrage, arret, erreurs) dans %APPDATA%\Lanceur\barre.log
+$journal = Join-Path $env:APPDATA 'Lanceur\barre.log'
+New-Item -ItemType Directory -Force (Split-Path $journal) | Out-Null
+function Write-Journal([string]$m) {
+    try {
+        if ((Test-Path $journal) -and (Get-Item $journal).Length -gt 200KB) { Remove-Item $journal -Force }
+        Add-Content -Path $journal -Value ("{0:yyyy-MM-dd HH:mm:ss}  {1}" -f (Get-Date), $m) -Encoding UTF8
+    } catch {}
+}
+Write-Journal "Demarrage (PID $PID)"
+# Une erreur dans la barre ne doit jamais la fermer : on la note et on continue
+[Windows.Forms.Application]::SetUnhandledExceptionMode('CatchException')
+[Windows.Forms.Application]::add_ThreadException({ param($s, $e) Write-Journal "Erreur : $($e.Exception.Message)" })
 
 . (Join-Path $PSScriptRoot 'LanceurCore.ps1')
 
@@ -185,7 +215,7 @@ function Update-Layout {
     $box.Top = [int](($h - $box.Height) / 2)
 }
 
-$bar.Add_Load({ Update-Layout; [LanceurNative]::Placeholder($box.Handle, 'Rechercher...') })
+$bar.Add_Load({ Update-Layout; [LanceurNative]::AttachToTaskbar($bar.Handle); [LanceurNative]::Placeholder($box.Handle, 'Rechercher...') })
 
 # ---- Le menu de suggestions (au-dessus de la barre) ----
 $pop = New-Object LanceurPopup
@@ -257,10 +287,11 @@ function Show-Results {
     $list.EndUpdate()
     Update-BarIcon
     if (-not $list.Items.Count) { $pop.Hide(); return }
-    $ph = $list.Items.Count * $list.ItemHeight + [int](12 * $scale)
+    $ph = $list.Items.Count * $list.ItemHeight + [int](12 * $scale) + 4   # +4 : evite une barre de defilement inutile
     $px = [Math]::Min($script:barX, [Windows.Forms.Screen]::PrimaryScreen.Bounds.Right - $popW - 4)
     $pop.Bounds = New-Object Drawing.Rectangle($px, ($script:tbTop - $ph - [int](6 * $scale)), $popW, $ph)
     if (-not $pop.Visible) { $pop.Show() }
+    [LanceurNative]::AttachToTaskbar($pop.Handle)
     [LanceurNative]::KeepOnTop($pop.Handle)
     if (-not $box.Focused) { $box.Focus() }
 }
@@ -331,8 +362,12 @@ $bar.Add_Deactivate({ $pop.Hide() })
 
 # Rester au-dessus de la barre des taches, et bien place
 $timer = New-Object Windows.Forms.Timer
-$timer.Interval = 700
-$timer.Add_Tick({ Update-Layout; [LanceurNative]::KeepOnTop($bar.Handle) })
+$timer.Interval = 500
+$timer.Add_Tick({
+    Update-Layout
+    [LanceurNative]::AttachToTaskbar($bar.Handle)   # refait si l'Explorateur a redemarre
+    [LanceurNative]::KeepOnTop($bar.Handle)
+})
 $timer.Start()
 
 # Rafraichir la liste des apps toutes les 30 min, seulement quand on n'est pas en train de taper
@@ -350,10 +385,12 @@ $hk.add_HotKey({ $bar.Activate(); [LanceurNative]::Front($bar.Handle); $box.Focu
 $menu = New-Object Windows.Forms.ContextMenuStrip
 [void]$menu.Items.Add('Gerer les alias...', $null, { Reset-Bar; Show-AliasManager })
 [void]$menu.Items.Add('Actualiser la liste des apps', $null, { Import-Apps; $script:icons = @{} })
-[void]$menu.Items.Add('Quitter la barre', $null, { $bar.Close() })
+[void]$menu.Items.Add('Quitter la barre', $null, { Write-Journal 'Quitter (menu)'; Set-Content $stopFlag '' -ErrorAction SilentlyContinue; $bar.Close() })
 $bar.ContextMenuStrip = $menu
 $box.ContextMenuStrip = $menu
 $pic.ContextMenuStrip = $menu
 
-[Windows.Forms.Application]::Run($bar)
+try { [Windows.Forms.Application]::Run($bar) }
+catch { Write-Journal "Arret sur erreur : $($_.Exception.Message)" }
+Write-Journal 'Arret'
 $mutex.ReleaseMutex()
