@@ -1,0 +1,359 @@
+# Barre de recherche posee dans la barre des taches Windows.
+# Clique dedans (ou Ctrl+Alt+Espace), tape, Entree pour lancer.
+
+# ---- Reglages (en pixels "logiques", a 100 % de zoom) ----
+$Largeur     = 200   # largeur de la barre de recherche
+$MargeDroite = 290   # utilise seulement si la zone de l'horloge est introuvable
+# ----------------------------------------------------------
+
+# Une seule instance
+$mutex = New-Object Threading.Mutex($false, 'Local\LanceurBarre')
+if (-not $mutex.WaitOne(0)) { exit }
+
+Add-Type -AssemblyName System.Windows.Forms, System.Drawing
+Add-Type -ReferencedAssemblies System.Windows.Forms, System.Drawing, System -TypeDefinition @'
+using System;
+using System.Drawing;
+using System.Drawing.Imaging;
+using System.Runtime.InteropServices;
+using System.Windows.Forms;
+// Fenetre de suggestions qui s'affiche SANS prendre le clavier (sinon on ne peut plus taper)
+public class LanceurPopup : Form {
+    protected override bool ShowWithoutActivation { get { return true; } }
+    protected override CreateParams CreateParams {
+        get { var cp = base.CreateParams; cp.ExStyle |= 0x08000000 | 0x00000080 | 0x00000008; return cp; } // NOACTIVATE | TOOLWINDOW | TOPMOST
+    }
+}
+public class LanceurNative : NativeWindow {
+    [DllImport("user32.dll")] public static extern bool SetProcessDPIAware();
+    [DllImport("user32.dll")] static extern bool RegisterHotKey(IntPtr h, int id, uint mod, uint vk);
+    [DllImport("user32.dll")] static extern bool SetWindowPos(IntPtr h, IntPtr after, int x, int y, int cx, int cy, uint flags);
+    [DllImport("user32.dll")] static extern bool SetForegroundWindow(IntPtr h);
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern IntPtr SendMessage(IntPtr h, int msg, IntPtr w, string l);
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern IntPtr FindWindow(string c, string t);
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern IntPtr FindWindowEx(IntPtr p, IntPtr after, string c, string t);
+    [StructLayout(LayoutKind.Sequential)] struct RECT { public int L, T, R, B; }
+    [DllImport("user32.dll")] static extern bool GetWindowRect(IntPtr h, out RECT r);
+    public event EventHandler HotKey;
+    public LanceurNative() { CreateHandle(new CreateParams()); }
+    public bool Register(uint mod, uint vk) { return RegisterHotKey(Handle, 1, mod, vk); }
+    protected override void WndProc(ref Message m) {
+        if (m.Msg == 0x0312 && HotKey != null) HotKey(this, EventArgs.Empty);
+        base.WndProc(ref m);
+    }
+    public static void KeepOnTop(IntPtr h) { SetWindowPos(h, new IntPtr(-1), 0, 0, 0, 0, 0x0001 | 0x0002 | 0x0010); }
+    public static void Front(IntPtr h) { SetForegroundWindow(h); }
+    public static void Placeholder(IntPtr box, string text) { SendMessage(box, 0x1501, new IntPtr(1), text); }
+    // Rectangle de la barre des taches (vide si introuvable)
+    public static Rectangle Taskbar() {
+        IntPtr t = FindWindow("Shell_TrayWnd", null); RECT r;
+        if (t == IntPtr.Zero || !GetWindowRect(t, out r)) return Rectangle.Empty;
+        return Rectangle.FromLTRB(r.L, r.T, r.R, r.B);
+    }
+    // Bord gauche de la zone horloge / icones systeme (0 si introuvable)
+    public static int TrayLeft() {
+        IntPtr t = FindWindow("Shell_TrayWnd", null); if (t == IntPtr.Zero) return 0;
+        IntPtr n = FindWindowEx(t, IntPtr.Zero, "TrayNotifyWnd", null); RECT r;
+        if (n == IntPtr.Zero || !GetWindowRect(n, out r)) return 0;
+        return r.L;
+    }
+}
+// Icone d'une appli (appli du menu Demarrer, fichier ou dossier), avec transparence
+[ComImport, Guid("bcc18b79-ba16-442f-80c4-8a59c30c463b"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+interface IShellItemImageFactory { [PreserveSig] int GetImage(SIZE size, int flags, out IntPtr phbm); }
+[StructLayout(LayoutKind.Sequential)] struct SIZE { public int cx, cy; }
+public static class LanceurIcon {
+    [DllImport("shell32.dll", CharSet = CharSet.Unicode, PreserveSig = false)]
+    static extern void SHCreateItemFromParsingName(string path, IntPtr pbc, [MarshalAs(UnmanagedType.LPStruct)] Guid riid, [MarshalAs(UnmanagedType.Interface)] out IShellItemImageFactory ppv);
+    [DllImport("gdi32.dll")] static extern bool DeleteObject(IntPtr h);
+    public static Bitmap Get(string path, int size) {
+        IntPtr hb = IntPtr.Zero;
+        try {
+            IShellItemImageFactory f;
+            SHCreateItemFromParsingName(path, IntPtr.Zero, typeof(IShellItemImageFactory).GUID, out f);
+            if (f.GetImage(new SIZE { cx = size, cy = size }, 0x4, out hb) != 0) return null;   // SIIGBF_ICONONLY
+            using (var src = Image.FromHbitmap(hb)) {
+                if (Image.GetPixelFormatSize(src.PixelFormat) < 32) return new Bitmap(src);
+                var d = src.LockBits(new Rectangle(0, 0, src.Width, src.Height), ImageLockMode.ReadOnly, src.PixelFormat);
+                try { using (var argb = new Bitmap(d.Width, d.Height, d.Stride, PixelFormat.Format32bppArgb, d.Scan0)) return new Bitmap(argb); }
+                finally { src.UnlockBits(d); }
+            }
+        } catch { return null; }
+        finally { if (hb != IntPtr.Zero) DeleteObject(hb); }
+    }
+}
+'@
+[void][LanceurNative]::SetProcessDPIAware()
+[System.Windows.Forms.Application]::EnableVisualStyles()
+
+. (Join-Path $PSScriptRoot 'LanceurCore.ps1')
+
+$g = [Drawing.Graphics]::FromHwnd([IntPtr]::Zero); $scale = $g.DpiX / 96; $g.Dispose()
+$bg     = [Drawing.Color]::FromArgb(45, 45, 45)
+$bgPop  = [Drawing.Color]::FromArgb(32, 32, 32)
+$selCol = [Drawing.Color]::FromArgb(60, 90, 140)
+$brBg   = New-Object Drawing.SolidBrush($bgPop)
+$brSel  = New-Object Drawing.SolidBrush($selCol)
+
+# ---- Icones (avec cache) ----
+$script:icons = @{}
+$iconPx = [int](32 * $scale)
+function Get-AppIcon($a) {
+    if (-not $a) { return $null }
+    if ($script:icons.ContainsKey($a.Id)) { return $script:icons[$a.Id] }
+    $path = $null
+    if ($a.Target) {
+        $t = [Environment]::ExpandEnvironmentVariables($a.Target)
+        if (Test-Path -LiteralPath $t -ErrorAction SilentlyContinue) { $path = (Resolve-Path -LiteralPath $t).Path }
+        else { $cmd = Get-Command $t -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1; if ($cmd) { $path = $cmd.Source } }
+    } else { $path = "shell:AppsFolder\$($a.Id)" }
+    $img = if ($path) { [LanceurIcon]::Get($path, $iconPx) } else { $null }
+    $script:icons[$a.Id] = $img
+    $img
+}
+
+# Loupe dessinee une fois (icone de la barre quand rien n'est tape)
+function New-Loupe([int]$s) {
+    $b = New-Object Drawing.Bitmap($s, $s)
+    $gr = [Drawing.Graphics]::FromImage($b); $gr.SmoothingMode = 'AntiAlias'
+    $pen = New-Object Drawing.Pen([Drawing.Color]::FromArgb(200, 200, 200), [single]([Math]::Max(1.5, $s / 11)))
+    $d = $s * 0.58; $o = $s * 0.08
+    $gr.DrawEllipse($pen, [single]$o, [single]$o, [single]$d, [single]$d)
+    $gr.DrawLine($pen, [single]($o + $d * 0.85), [single]($o + $d * 0.85), [single]($s * 0.92), [single]($s * 0.92))
+    $gr.Dispose(); $b
+}
+
+# ---- La barre ----
+$bar = New-Object Windows.Forms.Form
+$bar.AutoScaleMode = 'None'
+$bar.FormBorderStyle = 'None'
+$bar.ShowInTaskbar = $false
+$bar.StartPosition = 'Manual'
+$bar.TopMost = $true
+$bar.BackColor = $bg
+$bar.MinimumSize = New-Object Drawing.Size(1, 1)
+
+$pic = New-Object Windows.Forms.PictureBox
+$pic.SizeMode = 'Zoom'
+$pic.BackColor = $bg
+$bar.Controls.Add($pic)
+
+$box = New-Object Windows.Forms.TextBox
+$box.BorderStyle = 'None'
+$box.BackColor = $bg
+$box.ForeColor = [Drawing.Color]::White
+$box.Font = New-Object Drawing.Font('Segoe UI', 10)
+$bar.Controls.Add($box)
+
+$script:loupe = $null
+$script:lay = $null
+
+# Place la barre dans la barre des taches, juste a gauche de l'horloge.
+# Appele en continu : se recale si la barre des taches n'etait pas prete au demarrage, ou si l'ecran change.
+function Update-Layout {
+    $tb = [LanceurNative]::Taskbar()
+    $scr = [Windows.Forms.Screen]::PrimaryScreen.Bounds
+    if ($tb.IsEmpty -or $tb.Height -lt 20 -or $tb.Top -ge $scr.Bottom) {
+        $wa = [Windows.Forms.Screen]::PrimaryScreen.WorkingArea
+        $hgt = [int](48 * $scale)
+        $tb = New-Object Drawing.Rectangle($scr.Left, ($scr.Bottom - $hgt), $scr.Width, $hgt)
+    }
+    $w = [int]($Largeur * $scale)
+    $h = [int]([Math]::Min($tb.Height * 0.66, 36 * $scale))
+    $right = [LanceurNative]::TrayLeft()
+    if ($right -le $tb.Left + $w -or $right -gt $tb.Right) { $right = $tb.Right - [int]($MargeDroite * $scale) }
+    $x = $right - $w - [int](8 * $scale)
+    $y = $tb.Top + [int](($tb.Height - $h) / 2)
+    $key = "$x,$y,$w,$h,$($tb.Top)"
+    if ($key -eq $script:lay) { return }
+    $script:lay = $key
+    $script:tbTop = $tb.Top; $script:barX = $x
+    $bar.Bounds = New-Object Drawing.Rectangle($x, $y, $w, $h)
+    # coins arrondis
+    $r = [int](8 * $scale); $p = New-Object Drawing.Drawing2D.GraphicsPath
+    $p.AddArc(0, 0, $r * 2, $r * 2, 180, 90); $p.AddArc($w - $r * 2, 0, $r * 2, $r * 2, 270, 90)
+    $p.AddArc($w - $r * 2, $h - $r * 2, $r * 2, $r * 2, 0, 90); $p.AddArc(0, $h - $r * 2, $r * 2, $r * 2, 90, 90)
+    $p.CloseFigure(); $bar.Region = New-Object Drawing.Region($p)
+    # icone a gauche, texte a droite
+    $is = [int]($h * 0.58)
+    $pic.Bounds = New-Object Drawing.Rectangle([int](8 * $scale), [int](($h - $is) / 2), $is, $is)
+    $script:loupe = New-Loupe $is
+    if (-not $box.Text) { $pic.Image = $script:loupe }
+    $bx = $pic.Right + [int](6 * $scale)
+    $box.Left = $bx
+    $box.Width = $w - $bx - [int](8 * $scale)
+    $box.Top = [int](($h - $box.Height) / 2)
+}
+
+$bar.Add_Load({ Update-Layout; [LanceurNative]::Placeholder($box.Handle, 'Rechercher...') })
+
+# ---- Le menu de suggestions (au-dessus de la barre) ----
+$pop = New-Object LanceurPopup
+$pop.AutoScaleMode = 'None'
+$pop.FormBorderStyle = 'None'
+$pop.ShowInTaskbar = $false
+$pop.StartPosition = 'Manual'
+$pop.BackColor = $bgPop
+$pop.Padding = New-Object Windows.Forms.Padding([int](6 * $scale))
+$popW = [int](360 * $scale)
+
+$list = New-Object Windows.Forms.ListBox
+$list.Dock = 'Fill'
+$list.Font = New-Object Drawing.Font('Segoe UI', 11)
+$list.BackColor = $bgPop
+$list.ForeColor = [Drawing.Color]::Gainsboro
+$list.BorderStyle = 'None'
+$list.IntegralHeight = $false
+$list.DrawMode = 'OwnerDrawFixed'
+$list.ItemHeight = [int](34 * $scale)
+$pop.Controls.Add($list)
+
+# Dessin d'une ligne : icone + nom
+$list.Add_DrawItem({
+    param($s, $e)
+    if ($e.Index -lt 0 -or $e.Index -ge $script:results.Count) { return }
+    $gr = $e.Graphics
+    $sel = ($e.State -band [Windows.Forms.DrawItemState]::Selected) -ne 0
+    $gr.FillRectangle($(if ($sel) { $brSel } else { $brBg }), $e.Bounds)
+    $isz = [int](24 * $scale); $pad = [int](8 * $scale)
+    $ico = Get-AppIcon $script:results[$e.Index]
+    if ($ico) {
+        $gr.InterpolationMode = 'HighQualityBicubic'
+        $gr.DrawImage($ico, $e.Bounds.X + $pad, $e.Bounds.Y + [int](($e.Bounds.Height - $isz) / 2), $isz, $isz)
+    }
+    $tx = $e.Bounds.X + $pad * 2 + $isz
+    $rect = New-Object Drawing.Rectangle($tx, $e.Bounds.Y, ($e.Bounds.Right - $tx - $pad), $e.Bounds.Height)
+    $col = if ($sel) { [Drawing.Color]::White } else { [Drawing.Color]::Gainsboro }
+    $flags = [Windows.Forms.TextFormatFlags]'VerticalCenter, Left, SingleLine, EndEllipsis, NoPrefix'
+    [Windows.Forms.TextRenderer]::DrawText($gr, [string]$list.Items[$e.Index], $list.Font, $rect, $col, $flags)
+})
+
+$script:results = @()
+$script:aliasMode = $null
+$fleche = [string][char]0x2192
+
+function Update-BarIcon {
+    $i = $list.SelectedIndex
+    $img = if ($box.Text -and $i -ge 0 -and $i -lt $script:results.Count) { Get-AppIcon $script:results[$i] } else { $null }
+    $pic.Image = if ($img) { $img } else { $script:loupe }
+}
+$list.Add_SelectedIndexChanged({ Update-BarIcon })
+
+function Show-Results {
+    # "ch=chrome" : mode creation d'alias
+    if ($box.Text -match '^\s*([^=]+?)\s*=\s*(.*)$') {
+        $script:aliasMode = $Matches[1]
+        $script:results = Find-Apps $Matches[2] 10
+    } else {
+        $script:aliasMode = $null
+        $script:results = Find-Apps $box.Text 10
+    }
+    $list.BeginUpdate(); $list.Items.Clear()
+    foreach ($a in $script:results) {
+        if ($script:aliasMode) { [void]$list.Items.Add("Alias  $($script:aliasMode)  $fleche  $($a.Name)") }
+        else { [void]$list.Items.Add((Get-AppLabel $a)) }
+    }
+    if ($list.Items.Count) { $list.SelectedIndex = 0 }
+    $list.EndUpdate()
+    Update-BarIcon
+    if (-not $list.Items.Count) { $pop.Hide(); return }
+    $ph = $list.Items.Count * $list.ItemHeight + [int](12 * $scale)
+    $px = [Math]::Min($script:barX, [Windows.Forms.Screen]::PrimaryScreen.Bounds.Right - $popW - 4)
+    $pop.Bounds = New-Object Drawing.Rectangle($px, ($script:tbTop - $ph - [int](6 * $scale)), $popW, $ph)
+    if (-not $pop.Visible) { $pop.Show() }
+    [LanceurNative]::KeepOnTop($pop.Handle)
+    if (-not $box.Focused) { $box.Focus() }
+}
+
+function Reset-Bar { $box.Text = ''; $pop.Hide(); $pic.Image = $script:loupe }
+
+# Petit message temporaire affiche dans la barre vide
+$flashTimer = New-Object Windows.Forms.Timer
+$flashTimer.Interval = 2500
+$flashTimer.Add_Tick({ $flashTimer.Stop(); [LanceurNative]::Placeholder($box.Handle, 'Rechercher...') })
+function Show-Flash([string]$msg) {
+    [LanceurNative]::Placeholder($box.Handle, $msg)
+    $flashTimer.Stop(); $flashTimer.Start()
+}
+
+function Start-Choice {
+    $app = if ($list.SelectedIndex -ge 0 -and $script:results.Count) { $script:results[$list.SelectedIndex] } else { $null }
+    if ($box.Text.Trim() -eq ':alias') { Reset-Bar; Show-AliasManager; return }
+    if ($script:aliasMode) {
+        $alias = $script:aliasMode
+        $cible = if ($app) { $app.Name } else { ($box.Text -split '=', 2)[1] }
+        if ($cible.Trim()) {
+            Add-Alias $alias $cible
+            Reset-Bar
+            Show-Flash ([char]0x2713 + " $alias $fleche $cible")
+        }
+        return
+    }
+    if (Invoke-Launch $app $box.Text) { Reset-Bar }
+}
+
+# Clic droit sur une suggestion : lui donner un alias
+$itemMenu = New-Object Windows.Forms.ContextMenuStrip
+[void]$itemMenu.Items.Add('Donner un alias a cette appli', $null, {
+    $i = $list.SelectedIndex
+    if ($i -ge 0 -and $i -lt $script:results.Count) {
+        # Prepare "=NomAppli" dans la barre, curseur au debut : il suffit de taper l'alias puis Entree
+        $name = $script:results[$i].Name
+        $pop.Hide()
+        [LanceurNative]::Front($bar.Handle)
+        $box.Focus()
+        $box.Text = "=$name"
+        $box.SelectionStart = 0
+        $box.SelectionLength = 0
+    }
+})
+$list.ContextMenuStrip = $itemMenu
+$list.Add_MouseDown({ if ($_.Button -eq 'Right') { $i = $list.IndexFromPoint($_.Location); if ($i -ge 0) { $list.SelectedIndex = $i } } })
+
+$box.Add_GotFocus({ Update-AppsIfStale; if ($box.Text) { Show-Results } })
+$box.Add_TextChanged({ if ($box.Text) { Show-Results } else { $pop.Hide(); $pic.Image = $script:loupe } })
+$box.Add_KeyDown({
+    param($s, $e)
+    switch ([int]$e.KeyCode) {   # 40 Bas, 38 Haut, 13 Entree, 27 Echap
+        40 { if (-not $pop.Visible) { Show-Results } elseif ($list.SelectedIndex -lt $list.Items.Count - 1) { $list.SelectedIndex++ }; $e.SuppressKeyPress = $true }
+        38 { if ($list.SelectedIndex -gt 0) { $list.SelectedIndex-- }; $e.SuppressKeyPress = $true }
+        13 { $e.SuppressKeyPress = $true; Start-Choice }
+        27 { $e.SuppressKeyPress = $true; Reset-Bar }
+    }
+})
+$list.Add_MouseClick({ if ($_.Button -ne 'Left') { return }; $i = $list.IndexFromPoint($_.Location); if ($i -ge 0) { $list.SelectedIndex = $i; Start-Choice } })
+$bar.Add_MouseDown({ [LanceurNative]::Front($bar.Handle); $box.Focus() })
+$pic.Add_MouseDown({ [LanceurNative]::Front($bar.Handle); $box.Focus() })
+$box.Add_MouseDown({ [LanceurNative]::Front($bar.Handle) })
+
+# Cacher les suggestions quand on clique ailleurs
+$bar.Add_Deactivate({ $pop.Hide() })
+
+# Rester au-dessus de la barre des taches, et bien place
+$timer = New-Object Windows.Forms.Timer
+$timer.Interval = 700
+$timer.Add_Tick({ Update-Layout; [LanceurNative]::KeepOnTop($bar.Handle) })
+$timer.Start()
+
+# Rafraichir la liste des apps toutes les 30 min, seulement quand on n'est pas en train de taper
+$refresh = New-Object Windows.Forms.Timer
+$refresh.Interval = 30 * 60 * 1000
+$refresh.Add_Tick({ if (-not $box.Focused) { Import-Apps; $script:icons = @{} } })
+$refresh.Start()
+
+# Raccourci global Ctrl+Alt+Espace
+$hk = New-Object LanceurNative
+[void]$hk.Register(0x0002 -bor 0x0001 -bor 0x4000, 0x20)   # CTRL | ALT | NOREPEAT, ESPACE
+$hk.add_HotKey({ $bar.Activate(); [LanceurNative]::Front($bar.Handle); $box.Focus(); $box.SelectAll() })
+
+# Menu clic droit : quitter / modifier les alias
+$menu = New-Object Windows.Forms.ContextMenuStrip
+[void]$menu.Items.Add('Gerer les alias...', $null, { Reset-Bar; Show-AliasManager })
+[void]$menu.Items.Add('Actualiser la liste des apps', $null, { Import-Apps; $script:icons = @{} })
+[void]$menu.Items.Add('Quitter la barre', $null, { $bar.Close() })
+$bar.ContextMenuStrip = $menu
+$box.ContextMenuStrip = $menu
+$pic.ContextMenuStrip = $menu
+
+[Windows.Forms.Application]::Run($bar)
+$mutex.ReleaseMutex()
