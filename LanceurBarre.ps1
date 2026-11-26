@@ -181,13 +181,13 @@ $script:lay = $null
 # Place la barre dans la barre des taches, juste a gauche de l'horloge.
 # Appele en continu : se recale si la barre des taches n'etait pas prete au demarrage, ou si l'ecran change.
 function Update-Layout {
-    $tb = [LanceurNative]::Taskbar()
+    # Hauteur/position verticale : bas de l'ecran - zone de travail (stable).
+    # La fenetre Shell_TrayWnd, elle, s'agrandit parfois vers le haut (menu des icones cachees, animations) : on ne s'y fie pas pour la hauteur.
     $scr = [Windows.Forms.Screen]::PrimaryScreen.Bounds
-    if ($tb.IsEmpty -or $tb.Height -lt 20 -or $tb.Top -ge $scr.Bottom) {
-        $wa = [Windows.Forms.Screen]::PrimaryScreen.WorkingArea
-        $hgt = [int](48 * $scale)
-        $tb = New-Object Drawing.Rectangle($scr.Left, ($scr.Bottom - $hgt), $scr.Width, $hgt)
-    }
+    $wa  = [Windows.Forms.Screen]::PrimaryScreen.WorkingArea
+    $hgt = $scr.Bottom - $wa.Bottom
+    if ($hgt -lt 20 -or $hgt -gt 120 * $scale) { $hgt = [int](48 * $scale) }   # barre masquee auto, ou pas encore prete
+    $tb = New-Object Drawing.Rectangle($scr.Left, ($scr.Bottom - $hgt), $scr.Width, $hgt)
     $w = [int]($Largeur * $scale)
     $h = [int]([Math]::Min($tb.Height * 0.66, 36 * $scale))
     $right = [LanceurNative]::TrayLeft()
