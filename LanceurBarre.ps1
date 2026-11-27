@@ -160,13 +160,35 @@ public class LanceurNative : NativeWindow {
     // reserve : pixels laisses libres au bord gauche de la barre des taches (la barre elle-meme quand elle est a gauche), sinon 0.
     // Ne marche qu'avec une barre des taches classique (fenetres "Start" et "ReBarWindow32", ex. ExplorerPatcher) ; sinon ne fait rien.
     [DllImport("user32.dll")] static extern bool IsWindowVisible(IntPtr h);
+    // L'Explorateur remet la zone des applis a cote du bouton (cache) a chaque reorganisation de la barre des taches
+    // (icones cachees ouvertes, appli lancee...). La minuterie de 500 ms laisserait les applis sous la barre un instant :
+    // un crochet WinEvent surveille la zone des applis et la replace des qu'elle bouge.
+    delegate void WinEventProc(IntPtr hook, uint ev, IntPtr hwnd, int idObject, int idChild, uint thread, uint time);
+    [DllImport("user32.dll")] static extern IntPtr SetWinEventHook(uint min, uint max, IntPtr mod, WinEventProc proc, uint pid, uint tid, uint flags);
+    [DllImport("user32.dll")] static extern bool UnhookWinEvent(IntPtr h);
+    static WinEventProc moveProc;   // garde une reference, sinon le ramasse-miettes le libere
+    static IntPtr moveHook, moveRebar;
+    static bool lastVisible = true; static int lastReserve;
+    static void OnMove(IntPtr hook, uint ev, IntPtr hwnd, int idObject, int idChild, uint thread, uint time) {
+        if (hwnd == moveRebar && idObject == 0 && !lastVisible) StartButton(false, lastReserve);
+    }
+    static void WatchRebar(IntPtr rebar) {
+        if (rebar == moveRebar && moveHook != IntPtr.Zero) return;
+        if (moveHook != IntPtr.Zero) { UnhookWinEvent(moveHook); moveHook = IntPtr.Zero; }
+        moveRebar = rebar; if (rebar == IntPtr.Zero) return;
+        uint pid; GetWindowThreadProcessId(rebar, out pid);
+        if (moveProc == null) moveProc = OnMove;
+        moveHook = SetWinEventHook(0x800B, 0x800B, IntPtr.Zero, moveProc, pid, 0, 0);   // EVENT_OBJECT_LOCATIONCHANGE, hors contexte
+    }
     public static bool StartButton(bool visible, int reserve) {
+        lastVisible = visible; lastReserve = reserve;
         IntPtr t = FindWindow("Shell_TrayWnd", null); if (t == IntPtr.Zero) return false;
         IntPtr s = FindWindowEx(t, IntPtr.Zero, "Start", null); if (s == IntPtr.Zero) return false;
         if (IsWindowVisible(s) != visible) ShowWindow(s, visible ? 5 : 0);   // SW_SHOW / SW_HIDE
         // Glisse la zone des applis (epinglees / ouvertes) a la place du bouton (ou apres la barre), ou la remet a cote du bouton.
         RECT tr, sr, br;
         IntPtr b = FindWindowEx(t, IntPtr.Zero, "ReBarWindow32", null);
+        WatchRebar(visible ? IntPtr.Zero : b);
         if (b == IntPtr.Zero || !GetWindowRect(t, out tr) || !GetWindowRect(s, out sr) || !GetWindowRect(b, out br)) return true;
         if (tr.R - tr.L < tr.B - tr.T) return true;   // barre des taches verticale : on ne touche pas
         int left = visible ? sr.R : (reserve > 0 ? tr.L + reserve : sr.L);

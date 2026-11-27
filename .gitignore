@@ -5,3 +5,6 @@ alias.txt
 # Raccourcis perso (le dossier est garde grace a .gitkeep)
 raccourcis/*
 !raccourcis/.gitkeep
+
+# Sauvegarde locale des raccourcis du menu Demarrer
+sauvegarde-raccourcis/
