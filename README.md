@@ -20,14 +20,11 @@ PowerShell 5.1 that ships with Windows. The interface is in French.
 - **Learns what you use**: frequently launched apps move to the top.
 - **Aliases**: type `ch=chrome` then Enter, and `ch` now launches Google Chrome.
   Right-click a suggestion → *Donner un alias à cette appli*, or type `:alias` to open the alias manager.
-- **Alias manager** (`:alias`, or right-click the bar → *Gérer les alias...*), dark like the bar:
-  - quick add: type the alias, Enter, type the app (suggestions with icons, Tab to take one), Enter — and go on
-    with the next one;
-  - bulk add: paste or type one `alias = target` per line (`:`, `->` or a Tab work too), with a live preview
-    (green = app found, orange = command / path / URL), then *Ajouter tout* or Ctrl+Enter;
-  - *Proposer des alias* suggests aliases for your most used apps (initials: `vsc` for Visual Studio Code);
-  - filter (Ctrl+F), edit (double-click or F2), delete several at once (Del);
-  - every change is saved at once and the bar uses it immediately (~30 ms); the previous file is kept as `alias.txt.bak`.
+- **Alias manager** (`:alias`, or right-click the bar → *Gérer les alias...*), Windows 11 style (dark title bar,
+  rounded corners): type the alias, Enter, type the app, Enter — it's added and you go on with the next one.
+  Search (Ctrl+F), edit (double-click or F2), delete with Del or the × shown on hover. Each target is labelled
+  (app, folder, file, web site, command) and unknown targets show in orange. Every change is saved at once and the
+  bar uses it immediately (~30 ms); the file as it was when the window opened is kept as `alias.txt.bak`.
 - **Your own shortcuts**: drop any `.lnk`, `.url`, `.exe` or document into the `raccourcis` folder
   (right-click the bar → *Ouvrir le dossier des raccourcis*) and it shows up under its file name.
   Put them in subfolders to sort them: `raccourcis\Travail\Compta.lnk` is tagged *Travail*, and typing

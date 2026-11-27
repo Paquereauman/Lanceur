@@ -313,332 +313,248 @@ function Add-Alias([string]$alias, [string]$cible) {
     Save-AliasPairs $pairs
 }
 
-# Lit des alias colles en masse : une ligne par alias, "alias = cible", "alias : cible", "alias<Tab>cible" ou "alias -> cible"
-function ConvertFrom-AliasText([string]$texte) {
-    foreach ($l in ($texte -split "`r?`n")) {
-        $l = $l.Trim(); if (-not $l -or $l.StartsWith('#')) { continue }
-        if ($l -match '^(.+?)\s*(?:=|->|→|:|\t)\s*(.+)$') { [pscustomobject]@{ Alias = $Matches[1].Trim(); Cible = $Matches[2].Trim(); Ok = $true; Ligne = $l } }
-        else { [pscustomobject]@{ Alias = ''; Cible = ''; Ok = $false; Ligne = $l } }
-    }
-}
-
-# Propose des alias pour les applis les plus utilisees qui n'en ont pas : initiales ("Visual Studio Code" -> vsc), sinon debut du nom
-function Get-AliasSuggestions([int]$max = 20) {
-    $pris = @{}; foreach ($p in (Get-AliasPairs)) { $pris[(ConvertTo-Key $p.Alias)] = $true }
-    $res = @()
-    foreach ($a in ($script:apps | Where-Object { -not $_.Aliases.Count -and $_.Type -notin 'Tache', 'Commande' -and [int]$script:hist[$_.Id] -gt 0 } |
-                    Sort-Object { -[int]$script:hist[$_.Id] })) {
-        $mots = @((ConvertTo-Key $a.Name) -split '[^a-z0-9]+' | Where-Object { $_ })
-        if (-not $mots) { continue }
-        $cands = @()
-        if ($mots.Count -ge 2) { $cands += -join ($mots | ForEach-Object { $_[0] }) }
-        $cands += $mots[0].Substring(0, [Math]::Min(3, $mots[0].Length)), $mots[0].Substring(0, [Math]::Min(4, $mots[0].Length))
-        $choix = $cands | Where-Object { $_.Length -ge 2 -and -not $pris[$_] } | Select-Object -First 1
-        if (-not $choix) { continue }
-        $pris[$choix] = $true
-        $res += "$choix = $($a.Name)"
-        if ($res.Count -ge $max) { break }
-    }
-    $res
-}
-
-# ---- Fenetre des alias ----
-# Ajout rapide (Entree, Entree, alias suivant...), ajout en masse avec apercu, filtre, suppression multiple.
+# ---- Fenetre des alias (style Windows 11) ----
+# Une colonne : ajout en haut (Entree, Entree, alias suivant), puis la liste filtrable.
 # Tout est enregistre a chaque changement, et la barre en tient compte aussitot.
-# $preset : nom d'une appli a pre-remplir comme cible (clic droit sur une suggestion)
+# $preset : nom d'une appli a pre-remplir comme cible (clic droit sur une suggestion de la barre)
 function Show-AliasManager([string]$preset) {
     $g = [Drawing.Graphics]::FromHwnd([IntPtr]::Zero); $k = $g.DpiX / 96; $g.Dispose()
     function px([double]$v) { [int]($v * $k) }
-    $cBg = [Drawing.Color]::FromArgb(32, 32, 32); $cPanel = [Drawing.Color]::FromArgb(45, 45, 45)
-    $cText = [Drawing.Color]::Gainsboro; $cDim = [Drawing.Color]::FromArgb(150, 150, 150)
-    $cAccent = [Drawing.Color]::FromArgb(60, 90, 140); $cOk = [Drawing.Color]::FromArgb(120, 200, 120); $cWarn = [Drawing.Color]::FromArgb(230, 180, 90)
-    $font = New-Object Drawing.Font('Segoe UI', 10); $fontTitre = New-Object Drawing.Font('Segoe UI Semibold', 11); $fontPetit = New-Object Drawing.Font('Segoe UI', 8.5)
-    $st = @{ pairs = (Get-AliasPairs); edit = $null; sugg = @() }
+    $cBg = [Drawing.Color]::FromArgb(32, 32, 32); $cChamp = [Drawing.Color]::FromArgb(45, 45, 45); $cChampHaut = [Drawing.Color]::FromArgb(52, 52, 52)
+    $cTexte = [Drawing.Color]::FromArgb(240, 240, 240); $cDim = [Drawing.Color]::FromArgb(160, 160, 160)
+    $cAccent = [Drawing.Color]::FromArgb(76, 194, 255); $cAccentFonce = [Drawing.Color]::FromArgb(0, 95, 184)
+    $cSel = [Drawing.Color]::FromArgb(50, 50, 50); $cWarn = [Drawing.Color]::FromArgb(252, 185, 0)
+    $famille = if ((New-Object Drawing.Text.InstalledFontCollection).Families.Name -contains 'Segoe UI Variable Text') { 'Segoe UI Variable Text' } else { 'Segoe UI' }
+    $font = New-Object Drawing.Font($famille, 10); $fontFort = New-Object Drawing.Font($famille, 10, [Drawing.FontStyle]::Bold)
+    $fontTitre = New-Object Drawing.Font($famille, 18, [Drawing.FontStyle]::Bold); $fontPetit = New-Object Drawing.Font($famille, 9)
+    $st = @{ pairs = (Get-AliasPairs); edit = $null; vue = @(); survol = -1 }
     $aIcone = [bool](Get-Command Get-AppIcon -ErrorAction SilentlyContinue)
     Copy-Item $aliasFile "$aliasFile.bak" -Force -ErrorAction SilentlyContinue   # filet de securite
 
     $f = New-Object Windows.Forms.Form
-    $f.Text = 'Alias du lanceur'
-    $f.StartPosition = 'CenterScreen'
-    $f.AutoScaleMode = 'None'
-    $f.Size = New-Object Drawing.Size((px 980), (px 620))
-    $f.MinimumSize = New-Object Drawing.Size((px 760), (px 480))
+    $f.Text = 'Alias'; $f.StartPosition = 'CenterScreen'; $f.AutoScaleMode = 'None'
+    $f.Size = New-Object Drawing.Size((px 620), (px 680)); $f.MinimumSize = New-Object Drawing.Size((px 460), (px 420))
     $f.TopMost = $true; $f.MinimizeBox = $false; $f.KeyPreview = $true
-    $f.BackColor = $cBg; $f.ForeColor = $cText; $f.Font = $font
-    $f.Padding = New-Object Windows.Forms.Padding((px 14))
+    $f.BackColor = $cBg; $f.ForeColor = $cTexte; $f.Font = $font
+    $f.Padding = New-Object Windows.Forms.Padding((px 24), (px 16), (px 24), (px 16))
+    # Barre de titre sombre et coins arrondis (Windows 11)
+    $f.Add_HandleCreated({ [LanceurCue]::Style($f.Handle) })
 
-    function New-Label($t, $fnt = $font, $col = $cText) { $l = New-Object Windows.Forms.Label; $l.Text = $t; $l.Font = $fnt; $l.ForeColor = $col; $l.AutoSize = $true; $l.Margin = New-Object Windows.Forms.Padding(0, 0, 0, (px 6)); $l }
-    function New-Box($cue) {
-        $t = New-Object Windows.Forms.TextBox; $t.BorderStyle = 'FixedSingle'; $t.BackColor = $cPanel; $t.ForeColor = [Drawing.Color]::White
-        $t.Dock = 'Fill'; $t.Margin = New-Object Windows.Forms.Padding(0, 0, (px 8), 0)
-        $t.Add_HandleCreated({ param($s) [void][LanceurCue]::Set($s.Handle, $s.Tag) }.GetNewClosure()); $t.Tag = $cue; $t
+    # Champ arrondi facon Windows 11 : fond gris, trait de couleur en bas quand il a le focus
+    function New-Champ($cue) {
+        $p = New-Object Windows.Forms.Panel; $p.Height = (px 36); $p.Dock = 'Fill'; $p.Margin = New-Object Windows.Forms.Padding(0, 0, (px 8), 0); $p.BackColor = $cBg
+        $t = New-Object Windows.Forms.TextBox; $t.BorderStyle = 'None'; $t.BackColor = $cChamp; $t.ForeColor = $cTexte; $t.Font = $font
+        $p.Controls.Add($t); $p.Tag = $t; $t.Tag = $cue
+        $p.Add_Resize({ param($s) $tb = $s.Tag; $tb.Left = (px 11); $tb.Width = $s.Width - (px 22); $tb.Top = [int](($s.Height - $tb.Height) / 2) - 1; $s.Invalidate() })
+        $p.Add_Paint({
+            param($s, $e)
+            $gr = $e.Graphics; $gr.SmoothingMode = 'AntiAlias'; $tb = $s.Tag
+            $r = New-Object Drawing.Rectangle(0, 0, ($s.Width - 1), ($s.Height - 1)); $d = (px 8)
+            $path = New-Object Drawing.Drawing2D.GraphicsPath
+            $path.AddArc($r.X, $r.Y, $d, $d, 180, 90); $path.AddArc($r.Right - $d, $r.Y, $d, $d, 270, 90)
+            $path.AddArc($r.Right - $d, $r.Bottom - $d, $d, $d, 0, 90); $path.AddArc($r.X, $r.Bottom - $d, $d, $d, 90, 90); $path.CloseFigure()
+            $gr.FillPath((New-Object Drawing.SolidBrush($tb.BackColor)), $path)
+            $gr.DrawPath((New-Object Drawing.Pen([Drawing.Color]::FromArgb(60, 60, 60))), $path)
+            if ($tb.Focused) { $gr.FillRectangle((New-Object Drawing.SolidBrush($cAccent)), (px 4), ($s.Height - (px 2)), ($s.Width - (px 8)), (px 2)) }
+        })
+        $t.Add_GotFocus({ param($s) $s.BackColor = $cBg; $s.Parent.Invalidate() })
+        $t.Add_LostFocus({ param($s) $s.BackColor = $cChamp; $s.Parent.Invalidate() })
+        $t.Add_HandleCreated({ param($s) [void][LanceurCue]::Set($s.Handle, $s.Tag) })
+        $p
     }
-    function New-Btn($t, $primaire = $false) {
-        $b = New-Object Windows.Forms.Button; $b.Text = $t; $b.FlatStyle = 'Flat'; $b.AutoSize = $true; $b.Padding = New-Object Windows.Forms.Padding((px 10), (px 3), (px 10), (px 3))
-        $b.BackColor = $(if ($primaire) { $cAccent } else { $cPanel }); $b.ForeColor = [Drawing.Color]::White
-        $b.FlatAppearance.BorderColor = $(if ($primaire) { $cAccent } else { [Drawing.Color]::FromArgb(70, 70, 70) }); $b.Cursor = 'Hand'
-        $b.Margin = New-Object Windows.Forms.Padding(0, 0, (px 8), 0); $b
+    # Bouton plat arrondi
+    function New-Bouton($texte, $plein) {
+        $b = New-Object Windows.Forms.Button; $b.Text = $texte; $b.FlatStyle = 'Flat'; $b.FlatAppearance.BorderSize = 0
+        $b.BackColor = $(if ($plein) { $cAccent } else { $cChamp }); $b.ForeColor = $(if ($plein) { [Drawing.Color]::Black } else { $cTexte })
+        $b.FlatAppearance.MouseOverBackColor = $(if ($plein) { [Drawing.Color]::FromArgb(100, 205, 255) } else { $cChampHaut })
+        $b.Font = $(if ($plein) { $fontFort } else { $font }); $b.Height = (px 36); $b.Width = (px 104); $b.Cursor = 'Hand'; $b.Margin = New-Object Windows.Forms.Padding(0)
+        $b.Add_Resize({ param($s) $d = (px 8); $p = New-Object Drawing.Drawing2D.GraphicsPath; $w = $s.Width; $h = $s.Height
+            $p.AddArc(0, 0, $d, $d, 180, 90); $p.AddArc($w - $d, 0, $d, $d, 270, 90); $p.AddArc($w - $d, $h - $d, $d, $d, 0, 90); $p.AddArc(0, $h - $d, $d, $d, 90, 90)
+            $s.Region = New-Object Drawing.Region($p) })
+        $b
     }
+    function New-Texte($t, $fnt, $col) { $l = New-Object Windows.Forms.Label; $l.Text = $t; $l.Font = $fnt; $l.ForeColor = $col; $l.AutoSize = $true; $l.Margin = New-Object Windows.Forms.Padding(0); $l }
 
-    # ---- Mise en page : liste a gauche, ajout a droite ----
-    $root = New-Object Windows.Forms.TableLayoutPanel
-    $root.Dock = 'Fill'; $root.ColumnCount = 2; $root.RowCount = 1
-    [void]$root.ColumnStyles.Add((New-Object Windows.Forms.ColumnStyle('Percent', 56)))
-    [void]$root.ColumnStyles.Add((New-Object Windows.Forms.ColumnStyle('Percent', 44)))
+    # ---- Mise en page (une colonne) ----
+    $col = New-Object Windows.Forms.TableLayoutPanel
+    $col.Dock = 'Fill'; $col.ColumnCount = 1; $col.RowCount = 7
+    foreach ($s in 'AutoSize', 'AutoSize', 'AutoSize', 'AutoSize', 'AutoSize', 'Percent', 'AutoSize') { [void]$col.RowStyles.Add((New-Object Windows.Forms.RowStyle($s, 100))) }
 
-    # -- Gauche : filtre + liste --
-    $gauche = New-Object Windows.Forms.TableLayoutPanel
-    $gauche.Dock = 'Fill'; $gauche.ColumnCount = 1; $gauche.RowCount = 4; $gauche.Margin = New-Object Windows.Forms.Padding(0, 0, (px 14), 0)
-    foreach ($s in 'AutoSize', 'AutoSize', 'Percent', 'AutoSize') { [void]$gauche.RowStyles.Add((New-Object Windows.Forms.RowStyle($s, 100))) }
-    $titreListe = New-Label 'Tes alias' $fontTitre
-    $filtre = New-Box 'Filtrer (alias, appli...)'; $filtre.Margin = New-Object Windows.Forms.Padding(0, 0, 0, (px 8))
-    $lv = New-Object Windows.Forms.ListView
-    $lv.Dock = 'Fill'; $lv.View = 'Details'; $lv.FullRowSelect = $true; $lv.HideSelection = $false; $lv.MultiSelect = $true
-    $lv.BorderStyle = 'None'; $lv.BackColor = $cPanel; $lv.ForeColor = $cText; $lv.HeaderStyle = 'Nonclickable'; $lv.OwnerDraw = $true
-    [void]$lv.Columns.Add('Alias', (px 110)); [void]$lv.Columns.Add('Ouvre', (px 330))
-    $img = New-Object Windows.Forms.ImageList; $img.ColorDepth = 'Depth32Bit'; $img.ImageSize = New-Object Drawing.Size((px 20), (px 20)); $lv.SmallImageList = $img
-    $brHead = New-Object Drawing.SolidBrush([Drawing.Color]::FromArgb(38, 38, 38))
-    $lv.Add_DrawColumnHeader({
-        param($s, $e)
-        $e.Graphics.FillRectangle($brHead, $e.Bounds)
-        $r = $e.Bounds; $r.X += (px 6)
-        [Windows.Forms.TextRenderer]::DrawText($e.Graphics, $e.Header.Text, $fontPetit, $r, $cDim, [Windows.Forms.TextFormatFlags]'VerticalCenter, Left')
-    })
-    $lv.Add_DrawItem({ param($s, $e) $e.DrawDefault = $true })
-    $lv.Add_DrawSubItem({ param($s, $e) $e.DrawDefault = $true })
-    $lv.Add_Resize({ if ($lv.Columns.Count -eq 2) { $lv.Columns[1].Width = [Math]::Max((px 100), $lv.ClientSize.Width - $lv.Columns[0].Width) } })
-    $basGauche = New-Object Windows.Forms.FlowLayoutPanel; $basGauche.AutoSize = $true; $basGauche.Dock = 'Fill'; $basGauche.Margin = New-Object Windows.Forms.Padding(0, (px 8), 0, 0)
-    $btnSuppr = New-Btn 'Supprimer'; $btnModif = New-Btn 'Modifier'
-    $aide = New-Label 'Double-clic : modifier    Suppr : supprimer    Ctrl+A : tout' $fontPetit $cDim; $aide.Margin = New-Object Windows.Forms.Padding(0, (px 8), 0, 0)
-    $basGauche.Controls.AddRange(@($btnModif, $btnSuppr, $aide))
-    $gauche.Controls.Add($titreListe, 0, 0); $gauche.Controls.Add($filtre, 0, 1); $gauche.Controls.Add($lv, 0, 2); $gauche.Controls.Add($basGauche, 0, 3)
+    $titre = New-Texte 'Alias' $fontTitre $cTexte
+    $sousTitre = New-Texte 'Un mot court qui ouvre une appli, un dossier ou un site depuis la barre.' $fontPetit $cDim
+    $sousTitre.Margin = New-Object Windows.Forms.Padding((px 2), (px 2), 0, (px 18))
 
-    # -- Droite : ajout rapide + ajout en masse --
-    $droite = New-Object Windows.Forms.TableLayoutPanel
-    $droite.Dock = 'Fill'; $droite.ColumnCount = 1; $droite.RowCount = 7
-    foreach ($s in 'AutoSize', 'AutoSize', 'AutoSize', 'AutoSize', 'Percent', 'Percent', 'AutoSize') { [void]$droite.RowStyles.Add((New-Object Windows.Forms.RowStyle($s, 50))) }
-    $titreAjout = New-Label 'Ajouter un alias' $fontTitre
-    $ligne = New-Object Windows.Forms.TableLayoutPanel; $ligne.Dock = 'Fill'; $ligne.ColumnCount = 3; $ligne.RowCount = 1; $ligne.AutoSize = $true
-    [void]$ligne.ColumnStyles.Add((New-Object Windows.Forms.ColumnStyle('Percent', 32)))
-    [void]$ligne.ColumnStyles.Add((New-Object Windows.Forms.ColumnStyle('Percent', 68)))
-    [void]$ligne.ColumnStyles.Add((New-Object Windows.Forms.ColumnStyle('AutoSize')))
-    $tbAlias = New-Box 'alias'; $tbCible = New-Box 'appli, dossier, URL...'
-    $btnAjout = New-Btn 'Ajouter' $true; $btnAjout.Margin = New-Object Windows.Forms.Padding(0)
-    $ligne.Controls.Add($tbAlias, 0, 0); $ligne.Controls.Add($tbCible, 1, 0); $ligne.Controls.Add($btnAjout, 2, 0)
-    $infoAjout = New-Label ("Entrée dans l'alias : passe à la cible.   Tab : prend la suggestion.`nEntrée dans la cible : ajoute, et on enchaîne sur le suivant.") $fontPetit $cDim
-    $infoAjout.Margin = New-Object Windows.Forms.Padding(0, (px 6), 0, (px 14))
-    $titreMasse = New-Label 'Ajouter en masse' $fontTitre
-    $masse = New-Object Windows.Forms.TextBox
-    $masse.Multiline = $true; $masse.AcceptsReturn = $true; $masse.AcceptsTab = $true; $masse.ScrollBars = 'Vertical'; $masse.WordWrap = $false
-    $masse.Dock = 'Fill'; $masse.BorderStyle = 'FixedSingle'; $masse.BackColor = $cPanel; $masse.ForeColor = [Drawing.Color]::White
-    $masse.Font = New-Object Drawing.Font('Consolas', 10); $masse.Margin = New-Object Windows.Forms.Padding(0, 0, 0, (px 6))
-    $apercu = New-Object Windows.Forms.ListBox
-    $apercu.Dock = 'Fill'; $apercu.BorderStyle = 'None'; $apercu.BackColor = $cBg; $apercu.IntegralHeight = $false
-    $apercu.DrawMode = 'OwnerDrawFixed'; $apercu.ItemHeight = (px 20); $apercu.SelectionMode = 'None'
-    $basDroite = New-Object Windows.Forms.FlowLayoutPanel; $basDroite.AutoSize = $true; $basDroite.Dock = 'Fill'; $basDroite.Margin = New-Object Windows.Forms.Padding(0, (px 8), 0, 0)
-    $btnTout = New-Btn 'Ajouter tout' $true; $btnPropose = New-Btn 'Proposer des alias'; $btnVider = New-Btn 'Vider'
-    $basDroite.Controls.AddRange(@($btnTout, $btnPropose, $btnVider))
-    $droite.Controls.Add($titreAjout, 0, 0); $droite.Controls.Add($ligne, 0, 1); $droite.Controls.Add($infoAjout, 0, 2)
-    $droite.Controls.Add($titreMasse, 0, 3); $droite.Controls.Add($masse, 0, 4); $droite.Controls.Add($apercu, 0, 5); $droite.Controls.Add($basDroite, 0, 6)
+    $ligne = New-Object Windows.Forms.TableLayoutPanel; $ligne.Dock = 'Fill'; $ligne.ColumnCount = 3; $ligne.RowCount = 1; $ligne.Height = (px 36)
+    $ligne.Margin = New-Object Windows.Forms.Padding(0, 0, 0, (px 6))
+    [void]$ligne.ColumnStyles.Add((New-Object Windows.Forms.ColumnStyle('Percent', 30)))
+    [void]$ligne.ColumnStyles.Add((New-Object Windows.Forms.ColumnStyle('Percent', 70)))
+    [void]$ligne.ColumnStyles.Add((New-Object Windows.Forms.ColumnStyle('Absolute', (px 104))))
+    [void]$ligne.RowStyles.Add((New-Object Windows.Forms.RowStyle('Absolute', (px 36))))
+    $chAlias = New-Champ 'Alias'; $chCible = New-Champ 'Appli, dossier ou URL'
+    $tbAlias = $chAlias.Tag; $tbCible = $chCible.Tag
+    $btnAjout = New-Bouton 'Ajouter' $true
+    $ligne.Controls.Add($chAlias, 0, 0); $ligne.Controls.Add($chCible, 1, 0); $ligne.Controls.Add($btnAjout, 2, 0)
+    $info = New-Texte '' $fontPetit $cDim; $info.Margin = New-Object Windows.Forms.Padding((px 2), (px 2), 0, (px 22))
 
-    $root.Controls.Add($gauche, 0, 0); $root.Controls.Add($droite, 1, 0)
-    $statut = New-Label '' $fontPetit $cDim; $statut.AutoSize = $false; $statut.Dock = 'Bottom'; $statut.Height = (px 26); $statut.TextAlign = 'BottomLeft'
-    $f.Controls.Add($root); $f.Controls.Add($statut)
+    $chFiltre = New-Champ 'Rechercher dans tes alias'; $chFiltre.Dock = 'Top'; $chFiltre.Margin = New-Object Windows.Forms.Padding(0, 0, 0, (px 10))
+    $filtre = $chFiltre.Tag
 
-    # Suggestions sous la case Cible (par-dessus le reste)
-    $sug = New-Object Windows.Forms.ListBox
-    $sug.Visible = $false; $sug.BorderStyle = 'FixedSingle'; $sug.BackColor = [Drawing.Color]::FromArgb(38, 38, 38); $sug.ForeColor = $cText
-    $sug.DrawMode = 'OwnerDrawFixed'; $sug.ItemHeight = (px 28); $sug.IntegralHeight = $false
-    $f.Controls.Add($sug); $sug.BringToFront()
-    $brSel = New-Object Drawing.SolidBrush($cAccent); $brSug = New-Object Drawing.SolidBrush($sug.BackColor)
+    $liste = New-Object Windows.Forms.ListBox
+    $liste.Dock = 'Fill'; $liste.BorderStyle = 'None'; $liste.BackColor = $cBg; $liste.ForeColor = $cTexte; $liste.IntegralHeight = $false
+    $liste.DrawMode = 'OwnerDrawFixed'; $liste.ItemHeight = (px 44); $liste.SelectionMode = 'MultiExtended'
+    $bas = New-Texte 'Double-clic : modifier     Suppr : supprimer     Ctrl+F : rechercher     Échap : fermer' $fontPetit $cDim
+    $bas.Margin = New-Object Windows.Forms.Padding((px 2), (px 10), 0, 0)
+
+    $col.Controls.Add($titre, 0, 0); $col.Controls.Add($sousTitre, 0, 1); $col.Controls.Add($ligne, 0, 2); $col.Controls.Add($info, 0, 3)
+    $col.Controls.Add($chFiltre, 0, 4); $col.Controls.Add($liste, 0, 5); $col.Controls.Add($bas, 0, 6)
+    $f.Controls.Add($col)
 
     # ---- Fonctions ----
-    function Get-Icone($app) {
-        if (-not $app -or -not $aIcone) { return $null }
-        if (-not $img.Images.ContainsKey($app.Id)) { $b = Get-AppIcon $app; if (-not $b) { return $null }; $img.Images.Add($app.Id, $b) }
-        $app.Id
-    }
     function Get-Resolu($cible) { $a = Resolve-Cible $cible; if ($a -and $a.Type -ne 'Commande') { $a } else { $null } }   # $null : commande / chemin / introuvable
+    function Set-Info($t, $c = $cDim) { $info.Text = $t; $info.ForeColor = $c }
+    # Ce que fait une cible qui n'est pas une appli : dossier, fichier, site web, commande, ou introuvable
+    function Get-Genre([string]$c) {
+        $x = [Environment]::ExpandEnvironmentVariables($c)
+        if ($x -match '^(https?://|www\.)') { return 'site web' }
+        if (Test-Path -LiteralPath $x -PathType Container -ErrorAction SilentlyContinue) { return 'dossier' }
+        if (Test-Path -LiteralPath $x -ErrorAction SilentlyContinue) { return 'fichier' }
+        if ($x -match '^[a-z][a-z0-9+.-]*:' -and $x -notmatch '^[a-z]:\') { return 'lien' }
+        if (Get-Command ($x -split ' ')[0] -CommandType Application -ErrorAction SilentlyContinue) { return 'commande' }
+        'introuvable'
+    }
     function Update-Liste {
         $q = ConvertTo-Key $filtre.Text.Trim()
-        $lv.BeginUpdate(); $lv.Items.Clear()
-        $tri = @($st.pairs | Sort-Object { ConvertTo-Key $_.Alias })
-        foreach ($p in $tri) {
+        $vue = New-Object Collections.ArrayList
+        foreach ($p in ($st.pairs | Sort-Object { ConvertTo-Key $_.Alias })) {
             $a = Get-Resolu $p.Cible
-            $ouvre = if ($a) { if ($a.Type -ne 'Appli') { "$($a.Name)   ·  $($a.Type)" } else { $a.Name } } else { "$($p.Cible)   ·  commande / chemin" }
-            if ($q -and -not ((ConvertTo-Key "$($p.Alias) $ouvre $($p.Cible)").Contains($q))) { continue }
-            $it = New-Object Windows.Forms.ListViewItem($p.Alias)
-            [void]$it.SubItems.Add($ouvre); $it.Tag = $p
-            $ic = Get-Icone $a; if ($ic) { $it.ImageKey = $ic }
-            if (-not $a) { $it.ForeColor = $cWarn }
-            [void]$lv.Items.Add($it)
+            $nom = if ($a) { $a.Name } else { $p.Cible }
+            if ($q -and -not (ConvertTo-Key "$($p.Alias) $nom $($p.Cible)").Contains($q)) { continue }
+            [void]$vue.Add([pscustomobject]@{ Paire = $p; App = $a; Brut = (Resolve-Cible $p.Cible); Nom = $nom; Genre = $(if ($a) { '' } else { Get-Genre $p.Cible }) })
         }
-        $lv.EndUpdate()
-        $n = $st.pairs.Count
-        $titreListe.Text = "Tes alias  ($n)"
+        $st.vue = $vue
+        $liste.BeginUpdate(); $liste.Items.Clear(); foreach ($v in $vue) { [void]$liste.Items.Add($v.Paire.Alias) }; $liste.EndUpdate()
+        $sousTitre.Text = "$($st.pairs.Count) alias  ·  un mot court qui ouvre une appli, un dossier ou un site depuis la barre."
     }
-    function Set-Statut($t) { $statut.Text = $t }
     function Save-Tout($msg) {
         Save-AliasPairs $st.pairs
         $st.pairs = Get-AliasPairs
         Update-Liste
-        Set-Statut ([string][char]0x2713 + "  $msg  ·  enregistré, la barre en tient compte tout de suite")
+        Set-Info ([string][char]0x2713 + "  $msg") $cAccent
     }
-    function Reset-Ajout { $st.edit = $null; $btnAjout.Text = 'Ajouter'; $tbAlias.Text = ''; $tbCible.Text = ''; $sug.Visible = $false; $tbAlias.Focus() }
+    function Reset-Ajout { $st.edit = $null; $btnAjout.Text = 'Ajouter'; $tbAlias.Text = ''; $tbCible.Text = ''; $tbAlias.Focus() }
     function Add-Une {
         $a = $tbAlias.Text.Trim(); $c = $tbCible.Text.Trim()
-        if ($sug.Visible -and $sug.SelectedIndex -ge 0) { $c = $st.sugg[$sug.SelectedIndex].Name }
         if (-not $a) { $tbAlias.Focus(); return }
-        if ($a.Contains('=')) { Set-Statut "L'alias ne peut pas contenir '='"; return }
+        if ($a.Contains('=')) { Set-Info "Un alias ne peut pas contenir « = »." $cWarn; return }
         if (-not $c) { $tbCible.Focus(); return }
         $ka = ConvertTo-Key $a
-        $ancien = @($st.pairs | Where-Object { (ConvertTo-Key $_.Alias) -eq $ka })
-        foreach ($x in @($st.pairs | Where-Object { $st.edit -and $_ -eq $st.edit })) { $st.pairs.Remove($x) }
-        foreach ($x in $ancien) { $st.pairs.Remove($x) }
+        $remplace = @($st.pairs | Where-Object { (ConvertTo-Key $_.Alias) -eq $ka -and $_ -ne $st.edit }).Count -gt 0
+        foreach ($x in @($st.pairs | Where-Object { (ConvertTo-Key $_.Alias) -eq $ka -or ($st.edit -and $_ -eq $st.edit) })) { $st.pairs.Remove($x) }
         [void]$st.pairs.Add([pscustomobject]@{ Alias = $a; Cible = $c })
-        $r = Get-Resolu $c; $nom = if ($r) { $r.Name } else { $c }
-        Save-Tout ("$a $([char]0x2192) $nom" + $(if ($ancien.Count -and -not $st.edit) { '  (remplace)' } else { '' }))
+        $r = Get-Resolu $c
+        $msg = "$a $([char]0x2192) $(if ($r) { $r.Name } else { "$c  ($(Get-Genre $c))" })"
+        if ($st.edit) { $msg += '  · modifié' } elseif ($remplace) { $msg += '  · remplace l''ancien' }
+        Save-Tout $msg
         Reset-Ajout
     }
-    function Show-Sugg {
-        $t = $tbCible.Text.Trim()
-        if (-not $t -or -not $tbCible.Focused) { $sug.Visible = $false; return }
-        $st.sugg = @(Find-Apps $t 7 | Where-Object { $_.Type -ne 'Commande' })
-        $sug.BeginUpdate(); $sug.Items.Clear(); foreach ($x in $st.sugg) { [void]$sug.Items.Add($x.Name) }; $sug.EndUpdate()
-        if (-not $st.sugg.Count) { $sug.Visible = $false; return }
-        $pt = $f.PointToClient($tbCible.PointToScreen((New-Object Drawing.Point(0, $tbCible.Height))))
-        $sug.Bounds = New-Object Drawing.Rectangle($pt.X, ($pt.Y + 2), [Math]::Max($tbCible.Width, (px 280)), ($st.sugg.Count * $sug.ItemHeight + 4))
-        $sug.SelectedIndex = 0; $sug.Visible = $true; $sug.BringToFront()
-    }
     function Edit-Selection {
-        if (-not $lv.SelectedItems.Count) { return }
-        $p = $lv.SelectedItems[0].Tag
+        $i = $liste.SelectedIndex; if ($i -lt 0) { return }
+        $p = $st.vue[$i].Paire
         $st.edit = $p; $tbAlias.Text = $p.Alias; $tbCible.Text = $p.Cible; $btnAjout.Text = 'Modifier'
-        $tbAlias.Focus(); $tbAlias.SelectAll(); $sug.Visible = $false
-        Set-Statut "Modification de « $($p.Alias) » : change l'alias ou la cible, puis Entrée.  Échap : annuler"
+        $tbAlias.Focus(); $tbAlias.SelectAll()
+        Set-Info "Modification de « $($p.Alias) » : change l'alias ou la cible, puis Entrée.  Échap : annuler"
     }
     function Remove-Selection {
-        $sel = @($lv.SelectedItems | ForEach-Object { $_.Tag }); if (-not $sel.Count) { return }
+        $sel = @($liste.SelectedIndices | ForEach-Object { $st.vue[$_].Paire }); if (-not $sel.Count) { return }
         foreach ($p in $sel) { $st.pairs.Remove($p) }
-        Save-Tout ("$($sel.Count) alias supprimé" + $(if ($sel.Count -gt 1) { 's' } else { '' }) + '  (copie de l''ancien fichier : alias.txt.bak)')
-    }
-    function Update-Apercu {
-        $st.lignes = @(ConvertFrom-AliasText $masse.Text)
-        $apercu.BeginUpdate(); $apercu.Items.Clear()
-        foreach ($l in $st.lignes) { [void]$apercu.Items.Add($l.Ligne) }
-        $apercu.EndUpdate()
-        $ok = @($st.lignes | Where-Object Ok).Count
-        $btnTout.Text = if ($ok) { "Ajouter tout ($ok)" } else { 'Ajouter tout' }
-        $btnTout.Enabled = $ok -gt 0
+        Save-Tout ("$($sel.Count) alias supprimé" + $(if ($sel.Count -gt 1) { 's' } else { '' }))
     }
 
-    # Apercu de l'ajout en masse : vert = appli trouvee, orange = commande / chemin / URL, gris = ligne illisible
-    $apercu.Add_DrawItem({
+    # Une ligne : icone, alias, appli ouverte ; selection arrondie avec un trait de couleur a gauche ; x pour supprimer au survol
+    $liste.Add_DrawItem({
         param($s, $e)
-        if ($e.Index -lt 0 -or $e.Index -ge $st.lignes.Count) { return }
-        $e.Graphics.FillRectangle((New-Object Drawing.SolidBrush($cBg)), $e.Bounds)
-        $l = $st.lignes[$e.Index]
-        if (-not $l.Ok) { $t = "  ?  $($l.Ligne)   (format : alias = cible)"; $col = $cDim }
-        else {
-            $a = Get-Resolu $l.Cible
-            $deja = @($st.pairs | Where-Object { (ConvertTo-Key $_.Alias) -eq (ConvertTo-Key $l.Alias) }).Count
-            $suffixe = if ($deja) { '   (remplace l''existant)' } else { '' }
-            if ($a) { $t = "  $([char]0x2713)  $($l.Alias)  $([char]0x2192)  $($a.Name)$suffixe"; $col = $cOk }
-            else { $t = "  !  $($l.Alias)  $([char]0x2192)  $($l.Cible)  (commande / chemin)$suffixe"; $col = $cWarn }
+        if ($e.Index -lt 0 -or $e.Index -ge $st.vue.Count) { return }
+        $gr = $e.Graphics; $gr.SmoothingMode = 'AntiAlias'; $gr.TextRenderingHint = 'ClearTypeGridFit'
+        $gr.FillRectangle((New-Object Drawing.SolidBrush($cBg)), $e.Bounds)
+        $v = $st.vue[$e.Index]; $sel = ($e.State -band [Windows.Forms.DrawItemState]::Selected) -ne 0; $survol = $e.Index -eq $st.survol
+        $r = New-Object Drawing.Rectangle($e.Bounds.X, ($e.Bounds.Y + (px 2)), ($e.Bounds.Width - 1), ($e.Bounds.Height - (px 4)))
+        if ($sel -or $survol) {
+            $d = (px 8); $p = New-Object Drawing.Drawing2D.GraphicsPath
+            $p.AddArc($r.X, $r.Y, $d, $d, 180, 90); $p.AddArc($r.Right - $d, $r.Y, $d, $d, 270, 90); $p.AddArc($r.Right - $d, $r.Bottom - $d, $d, $d, 0, 90); $p.AddArc($r.X, $r.Bottom - $d, $d, $d, 90, 90); $p.CloseFigure()
+            $gr.FillPath((New-Object Drawing.SolidBrush($(if ($sel) { $cSel } else { [Drawing.Color]::FromArgb(40, 40, 40) }))), $p)
+            if ($sel) { $gr.FillRectangle((New-Object Drawing.SolidBrush($cAccent)), $r.X, ($r.Y + $r.Height / 2 - (px 8)), (px 3), (px 16)) }
         }
-        [Windows.Forms.TextRenderer]::DrawText($e.Graphics, $t, $fontPetit, $e.Bounds, $col, [Windows.Forms.TextFormatFlags]'VerticalCenter, Left, SingleLine, EndEllipsis, NoPrefix')
+        $isz = (px 22); $x = $r.X + (px 14)
+        $b = if ($aIcone -and $v.Brut -and $v.Genre -ne 'introuvable') { Get-AppIcon $v.Brut } else { $null }
+        if ($b) { $gr.InterpolationMode = 'HighQualityBicubic'; $gr.DrawImage($b, $x, $r.Y + [int](($r.Height - $isz) / 2), $isz, $isz) }
+        elseif (-not $v.App) { [Windows.Forms.TextRenderer]::DrawText($gr, [string][char]0x2197, $font, (New-Object Drawing.Rectangle($x, $r.Y, $isz, $r.Height)), $cWarn, [Windows.Forms.TextFormatFlags]'VerticalCenter, HorizontalCenter') }
+        $x += $isz + (px 14)
+        $wAlias = (px 140)
+        $fl = [Windows.Forms.TextFormatFlags]'VerticalCenter, Left, SingleLine, EndEllipsis, NoPrefix'
+        [Windows.Forms.TextRenderer]::DrawText($gr, $v.Paire.Alias, $fontFort, (New-Object Drawing.Rectangle($x, $r.Y, ($wAlias - (px 8)), $r.Height)), $cTexte, $fl)
+        $x += $wAlias
+        $droite = $r.Right - $(if ($survol) { (px 40) } else { (px 12) })
+        $texte = if ($v.App) { $v.Nom + $(if ($v.App.Type -ne 'Appli') { "   ·  $($v.App.Type)" } else { '' }) } else { "$($v.Nom)   ·  $($v.Genre)" }
+        [Windows.Forms.TextRenderer]::DrawText($gr, $texte, $font, (New-Object Drawing.Rectangle($x, $r.Y, [Math]::Max(10, $droite - $x), $r.Height)), $(if ($v.Genre -eq 'introuvable') { $cWarn } else { $cDim }), $fl)
+        if ($survol) { [Windows.Forms.TextRenderer]::DrawText($gr, [string][char]0x2715, $font, (New-Object Drawing.Rectangle(($r.Right - (px 36)), $r.Y, (px 28), $r.Height)), $cDim, [Windows.Forms.TextFormatFlags]'VerticalCenter, HorizontalCenter') }
     })
-    $sug.Add_DrawItem({
-        param($s, $e)
-        if ($e.Index -lt 0 -or $e.Index -ge $st.sugg.Count) { return }
-        $sel = ($e.State -band [Windows.Forms.DrawItemState]::Selected) -ne 0
-        $e.Graphics.FillRectangle($(if ($sel) { $brSel } else { $brSug }), $e.Bounds)
-        $x = $st.sugg[$e.Index]; $isz = (px 20); $pad = (px 6)
-        if ($aIcone) { $b = Get-AppIcon $x; if ($b) { $e.Graphics.InterpolationMode = 'HighQualityBicubic'; $e.Graphics.DrawImage($b, $e.Bounds.X + $pad, $e.Bounds.Y + [int](($e.Bounds.Height - $isz) / 2), $isz, $isz) } }
-        $r = New-Object Drawing.Rectangle(($e.Bounds.X + $pad * 2 + $isz), $e.Bounds.Y, ($e.Bounds.Width - $pad * 3 - $isz), $e.Bounds.Height)
-        $t = if ($x.Type -ne 'Appli') { "$($x.Name)   ·  $($x.Type)" } else { $x.Name }
-        [Windows.Forms.TextRenderer]::DrawText($e.Graphics, $t, $font, $r, [Drawing.Color]::White, [Windows.Forms.TextFormatFlags]'VerticalCenter, Left, SingleLine, EndEllipsis, NoPrefix')
+    $liste.Add_MouseMove({
+        $i = $liste.IndexFromPoint($_.Location)
+        if ($i -ne $st.survol) { $st.survol = $i; $liste.Invalidate() }
+        $liste.Cursor = if ($i -ge 0 -and $_.X -gt $liste.ClientSize.Width - (px 40)) { 'Hand' } else { 'Default' }
+    })
+    $liste.Add_MouseLeave({ $st.survol = -1; $liste.Invalidate() })
+    $liste.Add_MouseUp({
+        $i = $liste.IndexFromPoint($_.Location)
+        if ($_.Button -eq 'Left' -and $i -ge 0 -and $_.X -gt $liste.ClientSize.Width - (px 40)) {   # clic sur x
+            $p = $st.vue[$i].Paire; $st.pairs.Remove($p); Save-Tout "« $($p.Alias) » supprimé"
+        }
     })
 
     # ---- Evenements ----
     $filtre.Add_TextChanged({ Update-Liste })
-    $tbCible.Add_TextChanged({ Show-Sugg })
-    $tbCible.Add_PreviewKeyDown({ if ($_.KeyCode -eq 'Tab' -and $sug.Visible) { $_.IsInputKey = $true } })   # Tab accepte la suggestion
-    $tbCible.Add_LostFocus({ if (-not $sug.Focused) { $sug.Visible = $false } })
-    $sug.Add_MouseUp({ $i = $sug.IndexFromPoint($_.Location); if ($i -ge 0) { $tbCible.Text = $st.sugg[$i].Name; $sug.Visible = $false; $tbCible.Focus(); $tbCible.SelectionStart = $tbCible.Text.Length } })
     $tbAlias.Add_KeyDown({ param($s, $e) if ($e.KeyCode -eq 'Return') { $e.SuppressKeyPress = $true; if ($tbCible.Text) { Add-Une } else { $tbCible.Focus() } } })
-    $tbCible.Add_KeyDown({
-        param($s, $e)
-        switch ($e.KeyCode) {
-            'Return' { $e.SuppressKeyPress = $true; Add-Une }
-            'Down'   { if ($sug.Visible -and $sug.SelectedIndex -lt $sug.Items.Count - 1) { $sug.SelectedIndex++ }; $e.SuppressKeyPress = $true }
-            'Up'     { if ($sug.Visible -and $sug.SelectedIndex -gt 0) { $sug.SelectedIndex-- }; $e.SuppressKeyPress = $true }
-            'Tab'    { if ($sug.Visible -and $sug.SelectedIndex -ge 0) { $tbCible.Text = $st.sugg[$sug.SelectedIndex].Name; $tbCible.SelectionStart = $tbCible.Text.Length; $sug.Visible = $false; $e.SuppressKeyPress = $true } }
-        }
-    })
+    $tbCible.Add_KeyDown({ param($s, $e) if ($e.KeyCode -eq 'Return') { $e.SuppressKeyPress = $true; Add-Une } })
     $btnAjout.Add_Click({ Add-Une })
-    $lv.Add_DoubleClick({ Edit-Selection })
-    $lv.Add_KeyDown({
+    $liste.Add_DoubleClick({ if ($liste.PointToClient([Windows.Forms.Control]::MousePosition).X -le $liste.ClientSize.Width - (px 40)) { Edit-Selection } })
+    $liste.Add_KeyDown({
         param($s, $e)
         if ($e.KeyCode -eq 'Delete') { Remove-Selection; $e.Handled = $true }
         elseif ($e.KeyCode -eq 'F2' -or $e.KeyCode -eq 'Return') { Edit-Selection; $e.Handled = $true }
-        elseif ($e.Control -and $e.KeyCode -eq 'A') { foreach ($it in $lv.Items) { $it.Selected = $true }; $e.Handled = $true }
+        elseif ($e.Control -and $e.KeyCode -eq 'A') { for ($i = 0; $i -lt $liste.Items.Count; $i++) { $liste.SetSelected($i, $true) }; $e.Handled = $true }
     })
-    $btnSuppr.Add_Click({ Remove-Selection })
-    $btnModif.Add_Click({ Edit-Selection })
-    # Apercu recalcule 150 ms apres la derniere frappe : coller 200 lignes reste fluide
-    $tempo = New-Object Windows.Forms.Timer; $tempo.Interval = 150
-    $tempo.Add_Tick({ $tempo.Stop(); Update-Apercu })
-    $masse.Add_TextChanged({ $tempo.Stop(); $tempo.Start() })
-    $masse.Add_KeyDown({ param($s, $e) if ($e.Control -and $e.KeyCode -eq 'Return') { $e.SuppressKeyPress = $true; $btnTout.PerformClick() } elseif ($e.Control -and $e.KeyCode -eq 'A') { $masse.SelectAll(); $e.SuppressKeyPress = $true } })
-    $btnTout.Add_Click({
-        $tempo.Stop(); Update-Apercu
-        $ok = @($st.lignes | Where-Object Ok); if (-not $ok.Count) { return }
-        foreach ($l in $ok) {
-            $ka = ConvertTo-Key $l.Alias
-            foreach ($x in @($st.pairs | Where-Object { (ConvertTo-Key $_.Alias) -eq $ka })) { $st.pairs.Remove($x) }
-            [void]$st.pairs.Add([pscustomobject]@{ Alias = $l.Alias; Cible = $l.Cible })
-        }
-        $illisibles = @($st.lignes | Where-Object { -not $_.Ok } | ForEach-Object Ligne)
-        Save-Tout "$($ok.Count) alias ajoutés"
-        $masse.Text = ($illisibles -join "`r`n")   # ne restent que les lignes a corriger
-    })
-    $btnPropose.Add_Click({
-        $p = @(Get-AliasSuggestions 20)
-        if (-not $p.Count) { Set-Statut 'Aucune proposition : tes applis les plus utilisées ont déjà un alias.'; return }
-        $debut = if ($masse.Text.Trim()) { $masse.Text.TrimEnd() + "`r`n" } else { '' }
-        $masse.Text = $debut + ($p -join "`r`n")
-        Set-Statut "$($p.Count) propositions pour tes applis les plus utilisées : modifie ou supprime des lignes, puis Ajouter tout (Ctrl+Entrée)."
-        $masse.Focus(); $masse.SelectionStart = $masse.Text.Length
-    })
-    $btnVider.Add_Click({ $masse.Text = ''; $masse.Focus() })
+    $liste.Add_Resize({ $liste.Invalidate() })
+    $liste.Add_HandleCreated({ [LanceurCue]::Sombre($liste.Handle) })   # barre de defilement sombre
     $f.Add_KeyDown({
         param($s, $e)
         if ($e.KeyCode -eq 'Escape') {
             $e.SuppressKeyPress = $true
-            if ($sug.Visible) { $sug.Visible = $false } elseif ($st.edit -or $tbAlias.Text -or $tbCible.Text) { Reset-Ajout; Set-Statut '' } else { $f.Close() }
+            if ($st.edit -or $tbAlias.Text -or $tbCible.Text) { Reset-Ajout; Set-Info '' } else { $f.Close() }
         } elseif ($e.Control -and $e.KeyCode -eq 'F') { $filtre.Focus(); $filtre.SelectAll(); $e.SuppressKeyPress = $true }
     })
     $f.Add_Shown({
-        $lv.Columns[1].Width = [Math]::Max((px 100), $lv.ClientSize.Width - $lv.Columns[0].Width)
-        if ($preset) { $tbCible.Text = $preset; $sug.Visible = $false; Set-Statut "Tape l'alias pour « $preset », puis Entrée." }
+        if ($preset) { $tbCible.Text = $preset; Set-Info "Tape l'alias pour « $preset », puis Entrée." }
+        else { Set-Info "Tape l'alias, Entrée, puis l'appli, Entrée : c'est ajouté, tu enchaînes sur le suivant." }
         $tbAlias.Focus()
     })
-    $masse.Text = ''
-    $st.lignes = @(); Update-Apercu
     Update-Liste
-    Set-Statut "Échap : fermer    Ctrl+F : filtrer    Ctrl+Entrée (zone en masse) : ajouter tout"
     [void]$f.ShowDialog()
-    $tempo.Dispose()
 }
 
-# Texte d'aide grise dans une case vide (EM_SETCUEBANNER)
+# Texte d'aide grise dans une case vide (EM_SETCUEBANNER), barre de titre sombre et coins arrondis (Windows 11)
 if (-not ('LanceurCue' -as [type])) {
     Add-Type -TypeDefinition @'
 using System; using System.Runtime.InteropServices;
 public static class LanceurCue {
     [DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern IntPtr SendMessage(IntPtr h, int msg, IntPtr w, string l);
+    [DllImport("dwmapi.dll")] static extern int DwmSetWindowAttribute(IntPtr h, int attr, ref int val, int size);
     public static bool Set(IntPtr box, string text) { SendMessage(box, 0x1501, new IntPtr(1), text ?? ""); return true; }
+    [DllImport("uxtheme.dll", CharSet = CharSet.Unicode)] static extern int SetWindowTheme(IntPtr h, string app, string ids);
+    public static void Sombre(IntPtr h) { SetWindowTheme(h, "DarkMode_Explorer", null); }
+    public static void Style(IntPtr h) {
+        int on = 1; DwmSetWindowAttribute(h, 20, ref on, 4);        // DWMWA_USE_IMMERSIVE_DARK_MODE
+        int round = 2; DwmSetWindowAttribute(h, 33, ref round, 4);  // DWMWA_WINDOW_CORNER_PREFERENCE = arrondi
+    }
 }
 '@
 }
