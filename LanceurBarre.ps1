@@ -1,9 +1,10 @@
 # Barre de recherche posee dans la barre des taches Windows.
-# Clique dedans (ou Ctrl+Alt+Espace), tape, Entree pour lancer.
+# Clique dedans (ou touche Windows seule, ou Ctrl+Alt+Espace), tape, Entree pour lancer.
 
 # ---- Reglages (en pixels "logiques", a 100 % de zoom) ----
-$Largeur     = 200   # largeur de la barre de recherche
-$MargeDroite = 290   # utilise seulement si la zone de l'horloge est introuvable
+$Largeur       = 200     # largeur de la barre de recherche
+$MargeDroite   = 290     # utilise seulement si la zone de l'horloge est introuvable
+$ToucheWindows = $true   # appui seul sur la touche Windows = ouvre la barre (au lieu du menu Demarrer ; Ctrl+Echap l'ouvre toujours)
 # ----------------------------------------------------------
 
 # Une seule instance
@@ -31,6 +32,12 @@ public class LanceurPopup : Form {
     protected override CreateParams CreateParams {
         get { var cp = base.CreateParams; cp.ExStyle |= 0x08000000 | 0x00000080 | 0x00000008; return cp; } // NOACTIVATE | TOOLWINDOW | TOPMOST
     }
+    // Un clic sur une suggestion ne doit pas activer cette fenetre : sinon la barre recoit Deactivate
+    // (qui la vide et cache la liste) avant que le clic n'arrive.
+    protected override void WndProc(ref Message m) {
+        if (m.Msg == 0x0021) { m.Result = new IntPtr(3); return; }   // WM_MOUSEACTIVATE -> MA_NOACTIVATE
+        base.WndProc(ref m);
+    }
 }
 public class LanceurNative : NativeWindow {
     [DllImport("user32.dll")] public static extern bool SetProcessDPIAware();
@@ -46,11 +53,69 @@ public class LanceurNative : NativeWindow {
     public LanceurNative() { CreateHandle(new CreateParams()); }
     public bool Register(uint mod, uint vk) { return RegisterHotKey(Handle, 1, mod, vk); }
     protected override void WndProc(ref Message m) {
-        if (m.Msg == 0x0312 && HotKey != null) HotKey(this, EventArgs.Empty);
+        if ((m.Msg == 0x0312 || m.Msg == 0x8001) && HotKey != null) HotKey(this, EventArgs.Empty);   // WM_HOTKEY, ou touche Windows (WM_APP+1)
         base.WndProc(ref m);
     }
+    // ---- Touche Windows seule : ouvre la barre au lieu du menu Demarrer ----
+    // Crochet clavier bas niveau sur son propre thread (la frappe ne rame jamais, meme si la barre est occupee).
+    // Win+E, Win+D... marchent toujours : on ne reagit que si la touche Windows est relachee sans autre touche entre-temps.
+    delegate IntPtr LLProc(int n, IntPtr w, IntPtr l);
+    [StructLayout(LayoutKind.Sequential)] struct KBD { public uint vk, scan, flags, time; public UIntPtr extra; }
+    [StructLayout(LayoutKind.Sequential)] struct MSG { public IntPtr h; public uint msg; public IntPtr w, l; public uint time; public int x, y; }
+    [DllImport("user32.dll")] static extern IntPtr SetWindowsHookEx(int id, LLProc fn, IntPtr mod, uint tid);
+    [DllImport("user32.dll")] static extern IntPtr CallNextHookEx(IntPtr h, int n, IntPtr w, IntPtr l);
+    [DllImport("user32.dll")] static extern int GetMessage(out MSG m, IntPtr h, uint a, uint b);
+    [DllImport("user32.dll")] static extern bool PostMessage(IntPtr h, int msg, IntPtr w, IntPtr l);
+    [DllImport("user32.dll")] static extern void keybd_event(byte vk, byte scan, uint flags, UIntPtr extra);
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode)] static extern IntPtr GetModuleHandle(string n);
+    LLProc proc; IntPtr hook, target; bool winDown, other;
+    public void StartWinKey() {
+        target = Handle; proc = HookProc;
+        var t = new System.Threading.Thread(() => {
+            hook = SetWindowsHookEx(13, proc, GetModuleHandle(null), 0);   // WH_KEYBOARD_LL
+            MSG m; while (GetMessage(out m, IntPtr.Zero, 0, 0) > 0) { }
+        });
+        t.IsBackground = true; t.Start();
+    }
+    IntPtr HookProc(int n, IntPtr w, IntPtr l) {
+        if (n >= 0) {
+            var k = (KBD)Marshal.PtrToStructure(l, typeof(KBD));
+            if ((k.flags & 0x10) == 0) {   // on ignore les touches simulees (les notres)
+                int msg = w.ToInt32();
+                bool down = msg == 0x100 || msg == 0x104, up = msg == 0x101 || msg == 0x105;
+                if (k.vk == 0x5B || k.vk == 0x5C) {   // touche Windows gauche / droite
+                    if (down) { if (!winDown) { winDown = true; other = false; } }
+                    else if (up && winDown) {
+                        winDown = false;
+                        if (!other) {
+                            // Une touche "muette" entre l'appui et le relachement : Windows n'ouvre pas le menu Demarrer
+                            keybd_event(0xE8, 0, 0, UIntPtr.Zero); keybd_event(0xE8, 0, 2, UIntPtr.Zero);
+                            keybd_event((byte)k.vk, 0, 1 | 2, UIntPtr.Zero);   // relachement de la touche Windows (simule)
+                            PostMessage(target, 0x8001, IntPtr.Zero, IntPtr.Zero);
+                            return new IntPtr(1);   // le vrai relachement est avale
+                        }
+                    }
+                } else if (down && winDown) other = true;
+            }
+        }
+        return CallNextHookEx(hook, n, w, l);
+    }
     public static void KeepOnTop(IntPtr h) { SetWindowPos(h, new IntPtr(-1), 0, 0, 0, 0, 0x0001 | 0x0002 | 0x0010); }
-    public static void Front(IntPtr h) { SetForegroundWindow(h); }
+    // Met la fenetre au premier plan, meme quand une autre appli a le clavier
+    [DllImport("user32.dll")] static extern bool AttachThreadInput(uint a, uint b, bool f);
+    [DllImport("kernel32.dll")] static extern uint GetCurrentThreadId();
+    public static void Front(IntPtr h) {
+        uint pid, ft = GetWindowThreadProcessId(GetForegroundWindow(), out pid), me = GetCurrentThreadId();
+        if (ft != 0 && ft != me) { AttachThreadInput(me, ft, true); SetForegroundWindow(h); AttachThreadInput(me, ft, false); }
+        else SetForegroundWindow(h);
+    }
+    // Derniere fenetre utilisee hors de la barre (pour lui rendre le clavier sur Echap)
+    [DllImport("user32.dll")] static extern bool IsWindow(IntPtr h);
+    public static IntPtr OtherForeground() {
+        IntPtr f = GetForegroundWindow(); uint pid; GetWindowThreadProcessId(f, out pid);
+        return (f == IntPtr.Zero || pid == (uint)System.Diagnostics.Process.GetCurrentProcess().Id) ? IntPtr.Zero : f;
+    }
+    public static bool Alive(IntPtr h) { return h != IntPtr.Zero && IsWindow(h); }
     public static void Placeholder(IntPtr box, string text) { SendMessage(box, 0x1501, new IntPtr(1), text); }
     // Rectangle de la barre des taches (vide si introuvable)
     public static Rectangle Taskbar() {
@@ -124,7 +189,7 @@ public static class LanceurIcon {
 [void][LanceurNative]::SetProcessDPIAware()
 [System.Windows.Forms.Application]::EnableVisualStyles()
 
-# Journal (demarrage, arret, erreurs) dans %APPDATA%\Lanceur\barre.log
+# Journal (demarrage, arret, lancements, erreurs) dans %APPDATA%\Lanceur\barre.log
 $journal = Join-Path $env:APPDATA 'Lanceur\barre.log'
 New-Item -ItemType Directory -Force (Split-Path $journal) | Out-Null
 function Write-Journal([string]$m) {
@@ -149,19 +214,41 @@ $brSel  = New-Object Drawing.SolidBrush($selCol)
 
 # ---- Icones (avec cache) ----
 $script:icons = @{}
+$script:iconParChemin = @{}
 $iconPx = [int](32 * $scale)
 function Get-AppIcon($a) {
     if (-not $a) { return $null }
     if ($script:icons.ContainsKey($a.Id)) { return $script:icons[$a.Id] }
     $path = $null
-    if ($a.Target) {
+    if ($a.IconPath) { $path = $a.IconPath }   # Panneau de configuration / Parametres
+    elseif ($a.Target) {
         $t = [Environment]::ExpandEnvironmentVariables($a.Target)
         if (Test-Path -LiteralPath $t -ErrorAction SilentlyContinue) { $path = (Resolve-Path -LiteralPath $t).Path }
         else { $cmd = Get-Command $t -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1; if ($cmd) { $path = $cmd.Source } }
     } else { $path = "shell:AppsFolder\$($a.Id)" }
-    $img = if ($path) { [LanceurIcon]::Get($path, $iconPx) } else { $null }
+    # Meme fichier d'icone pour beaucoup d'entrees (taches, pages Parametres) : extrait une seule fois
+    if ($path -and $script:iconParChemin.ContainsKey($path)) { $img = $script:iconParChemin[$path] }
+    else { $img = if ($path) { [LanceurIcon]::Get($path, $iconPx) } else { $null }; if ($path) { $script:iconParChemin[$path] = $img } }
     $script:icons[$a.Id] = $img
     $img
+}
+
+# Une icone coute ~25 ms la premiere fois : on les precharge toutes en fond (les plus utilisees d'abord),
+# deux par tick et jamais pendant la frappe, pour que les suggestions s'affichent toujours instantanement.
+$script:fileIcones = New-Object Collections.Queue
+$prechargement = New-Object Windows.Forms.Timer
+$prechargement.Interval = 20
+$prechargement.Add_Tick({
+    if ($box.Focused -and $box.Text) { return }
+    for ($n = 0; $n -lt 2 -and $script:fileIcones.Count; $n++) { [void](Get-AppIcon $script:fileIcones.Dequeue()) }
+    if (-not $script:fileIcones.Count) { $prechargement.Stop() }
+})
+function Start-PrechargementIcones {
+    $script:fileIcones.Clear()
+    foreach ($a in ($script:apps | Sort-Object { -[int]$script:hist[$_.Id] })) {
+        if (-not $script:icons.ContainsKey($a.Id)) { $script:fileIcones.Enqueue($a) }
+    }
+    if ($script:fileIcones.Count) { $prechargement.Start() }
 }
 
 # Loupe dessinee une fois (icone de la barre quand rien n'est tape)
@@ -203,13 +290,23 @@ $script:lay = $null
 # Place la barre dans la barre des taches, juste a gauche de l'horloge.
 # Appele en continu : se recale si la barre des taches n'etait pas prete au demarrage, ou si l'ecran change.
 function Update-Layout {
-    # Hauteur/position verticale : bas de l'ecran - zone de travail (stable).
-    # La fenetre Shell_TrayWnd, elle, s'agrandit parfois vers le haut (menu des icones cachees, animations) : on ne s'y fie pas pour la hauteur.
+    # Hauteur/position verticale : ecran - zone de travail (stable). Gere la barre des taches en haut OU en bas.
+    # La fenetre Shell_TrayWnd, elle, s'agrandit parfois (menu des icones cachees, animations) : dernier recours seulement.
     $scr = [Windows.Forms.Screen]::PrimaryScreen.Bounds
     $wa  = [Windows.Forms.Screen]::PrimaryScreen.WorkingArea
-    $hgt = $scr.Bottom - $wa.Bottom
-    if ($hgt -lt 20 -or $hgt -gt 120 * $scale) { $hgt = [int](48 * $scale) }   # barre masquee auto, ou pas encore prete
-    $tb = New-Object Drawing.Rectangle($scr.Left, ($scr.Bottom - $hgt), $scr.Width, $hgt)
+    $enHaut = $false
+    if ($wa.Top -gt $scr.Top) { $enHaut = $true; $hgt = $wa.Top - $scr.Top }
+    elseif ($wa.Bottom -lt $scr.Bottom) { $hgt = $scr.Bottom - $wa.Bottom }
+    else {
+        # barre des taches masquee automatiquement : on regarde ou est Shell_TrayWnd
+        $t = [LanceurNative]::Taskbar()
+        $enHaut = (-not $t.IsEmpty) -and ($t.Top -le $scr.Top + 2) -and ($t.Bottom -lt $scr.Bottom - 2)
+        $hgt = if (-not $t.IsEmpty) { $t.Height } else { 0 }
+    }
+    if ($hgt -lt 20 -or $hgt -gt 120 * $scale) { $hgt = [int](48 * $scale) }   # pas encore prete
+    $tbY = if ($enHaut) { $scr.Top } else { $scr.Bottom - $hgt }
+    $tb = New-Object Drawing.Rectangle($scr.Left, $tbY, $scr.Width, $hgt)
+    $script:tbEnHaut = $enHaut; $script:tbBottom = $tb.Bottom
     $w = [int]($Largeur * $scale)
     $h = [int]([Math]::Min($tb.Height * 0.66, 36 * $scale))
     $right = [LanceurNative]::TrayLeft()
@@ -242,9 +339,9 @@ function Update-Layout {
     $box.Top = [int](($h - $box.Height) / 2)
 }
 
-$bar.Add_Load({ Update-Layout; [LanceurNative]::AttachToTaskbar($bar.Handle); [LanceurNative]::Placeholder($box.Handle, 'Rechercher...') })
+$bar.Add_Load({ Update-Layout; [LanceurNative]::AttachToTaskbar($bar.Handle); [LanceurNative]::Placeholder($box.Handle, 'Rechercher...'); Start-PrechargementIcones })
 
-# ---- Le menu de suggestions (au-dessus de la barre) ----
+# ---- Le menu de suggestions (au-dessus ou au-dessous de la barre) ----
 $pop = New-Object LanceurPopup
 $pop.AutoScaleMode = 'None'
 $pop.FormBorderStyle = 'None'
@@ -252,7 +349,7 @@ $pop.ShowInTaskbar = $false
 $pop.StartPosition = 'Manual'
 $pop.BackColor = $bgPop
 $pop.Padding = New-Object Windows.Forms.Padding([int](6 * $scale))
-$popW = [int](360 * $scale)
+$popW = [int](380 * $scale)
 
 $list = New-Object Windows.Forms.ListBox
 $list.Dock = 'Fill'
@@ -263,9 +360,10 @@ $list.BorderStyle = 'None'
 $list.IntegralHeight = $false
 $list.DrawMode = 'OwnerDrawFixed'
 $list.ItemHeight = [int](34 * $scale)
+$policeEtiquette = New-Object Drawing.Font('Segoe UI', 8)
 $pop.Controls.Add($list)
 
-# Dessin d'une ligne : icone + nom
+# Dessin d'une ligne : icone + nom (+ type a droite)
 $list.Add_DrawItem({
     param($s, $e)
     if ($e.Index -lt 0 -or $e.Index -ge $script:results.Count) { return }
@@ -279,7 +377,17 @@ $list.Add_DrawItem({
         $gr.DrawImage($ico, $e.Bounds.X + $pad, $e.Bounds.Y + [int](($e.Bounds.Height - $isz) / 2), $isz, $isz)
     }
     $tx = $e.Bounds.X + $pad * 2 + $isz
-    $rect = New-Object Drawing.Rectangle($tx, $e.Bounds.Y, ($e.Bounds.Right - $tx - $pad), $e.Bounds.Height)
+    $right = $e.Bounds.Right - $pad
+    # Etiquette grise a droite pour tout ce qui n'est pas une appli ("Parametres", "Raccourci"...)
+    $type = $script:results[$e.Index].Type
+    if ($type -and $type -ne 'Appli') {
+        $kw = [Windows.Forms.TextRenderer]::MeasureText($type, $policeEtiquette).Width
+        $kr = New-Object Drawing.Rectangle(($right - $kw), $e.Bounds.Y, $kw, $e.Bounds.Height)
+        $fl = [Windows.Forms.TextFormatFlags]'VerticalCenter, Right, SingleLine, NoPrefix'
+        [Windows.Forms.TextRenderer]::DrawText($gr, $type, $policeEtiquette, $kr, $(if ($sel) { [Drawing.Color]::LightGray } else { [Drawing.Color]::Gray }), $fl)
+        $right -= $kw + $pad
+    }
+    $rect = New-Object Drawing.Rectangle($tx, $e.Bounds.Y, ($right - $tx), $e.Bounds.Height)
     $col = if ($sel) { [Drawing.Color]::White } else { [Drawing.Color]::Gainsboro }
     $flags = [Windows.Forms.TextFormatFlags]'VerticalCenter, Left, SingleLine, EndEllipsis, NoPrefix'
     [Windows.Forms.TextRenderer]::DrawText($gr, [string]$list.Items[$e.Index], $list.Font, $rect, $col, $flags)
@@ -297,13 +405,14 @@ function Update-BarIcon {
 $list.Add_SelectedIndexChanged({ Update-BarIcon })
 
 function Show-Results {
+    # @(...) : garde un tableau meme avec un seul resultat
     # "ch=chrome" : mode creation d'alias
     if ($box.Text -match '^\s*([^=]+?)\s*=\s*(.*)$') {
         $script:aliasMode = $Matches[1]
-        $script:results = Find-Apps $Matches[2] 10
+        $script:results = @(Find-Apps $Matches[2] 10)
     } else {
         $script:aliasMode = $null
-        $script:results = Find-Apps $box.Text 10
+        $script:results = @(Find-Apps $box.Text 10)
     }
     $list.BeginUpdate(); $list.Items.Clear()
     foreach ($a in $script:results) {
@@ -316,7 +425,9 @@ function Show-Results {
     if (-not $list.Items.Count) { $pop.Hide(); return }
     $ph = $list.Items.Count * $list.ItemHeight + [int](12 * $scale) + 4   # +4 : evite une barre de defilement inutile
     $px = [Math]::Min($script:barX, [Windows.Forms.Screen]::PrimaryScreen.Bounds.Right - $popW - 4)
-    $pop.Bounds = New-Object Drawing.Rectangle($px, ($script:tbTop - $ph - [int](6 * $scale)), $popW, $ph)
+    # Barre des taches en haut : suggestions en dessous ; en bas : au-dessus
+    $py = if ($script:tbEnHaut) { $script:tbBottom + [int](6 * $scale) } else { $script:tbTop - $ph - [int](6 * $scale) }
+    $pop.Bounds = New-Object Drawing.Rectangle($px, $py, $popW, $ph)
     if (-not $pop.Visible) { $pop.Show() }
     [LanceurNative]::AttachToTaskbar($pop.Handle)
     [LanceurNative]::KeepOnTop($pop.Handle)
@@ -368,30 +479,53 @@ $itemMenu = New-Object Windows.Forms.ContextMenuStrip
 $list.ContextMenuStrip = $itemMenu
 $list.Add_MouseDown({ if ($_.Button -eq 'Right') { $i = $list.IndexFromPoint($_.Location); if ($i -ge 0) { $list.SelectedIndex = $i } } })
 
-$box.Add_GotFocus({ Update-AppsIfStale; if ($box.Text) { Show-Results } })
+$box.Add_GotFocus({ $n = $script:apps.Count; Update-AppsIfStale; if ($script:apps.Count -ne $n) { Start-PrechargementIcones }; if ($box.Text) { Show-Results } })
 $box.Add_TextChanged({ if ($box.Text) { Show-Results } else { $pop.Hide(); $pic.Image = $script:loupe } })
 $box.Add_KeyDown({
     param($s, $e)
+    # Ctrl+Espace : vide le champ en gardant le curseur dedans
+    if ($e.Control -and -not $e.Alt -and [int]$e.KeyCode -eq 32) { $e.SuppressKeyPress = $true; Reset-Bar; return }
+    # Ctrl+Retour arriere : efface le mot precedent, comme partout
+    # (par defaut une TextBox WinForms insere un caractere carre bizarre)
+    if ($e.Control -and -not $e.Alt -and [int]$e.KeyCode -eq 8) {
+        $e.SuppressKeyPress = $true
+        $p = $box.SelectionStart
+        if ($box.SelectionLength) { $box.SelectedText = ''; return }
+        $avant = $box.Text.Substring(0, $p) -replace '\S*\s*$', ''
+        $box.Text = $avant + $box.Text.Substring($p)
+        $box.SelectionStart = $avant.Length
+        return
+    }
     switch ([int]$e.KeyCode) {   # 40 Bas, 38 Haut, 13 Entree, 27 Echap
         40 { if (-not $pop.Visible) { Show-Results } elseif ($list.SelectedIndex -lt $list.Items.Count - 1) { $list.SelectedIndex++ }; $e.SuppressKeyPress = $true }
         38 { if ($list.SelectedIndex -gt 0) { $list.SelectedIndex-- }; $e.SuppressKeyPress = $true }
         13 { $e.SuppressKeyPress = $true; Start-Choice }
-        27 { $e.SuppressKeyPress = $true; Reset-Bar }
+        27 {   # Echap : vide la barre et rend le clavier a la fenetre d'avant
+            $e.SuppressKeyPress = $true; Reset-Bar
+            if ([LanceurNative]::Alive($script:fenAvant)) { [LanceurNative]::Front($script:fenAvant) }
+        }
     }
 })
-$list.Add_MouseClick({ if ($_.Button -ne 'Left') { return }; $i = $list.IndexFromPoint($_.Location); if ($i -ge 0) { $list.SelectedIndex = $i; Start-Choice } })
+# Lance au relachement du bouton gauche (MouseClick n'arrive pas toujours sur cette fenetre non activable)
+$list.Add_MouseUp({ if ($_.Button -ne 'Left') { return }; $i = $list.IndexFromPoint($_.Location); if ($i -ge 0) { $list.SelectedIndex = $i; Start-Choice } })
 $bar.Add_MouseDown({ [LanceurNative]::Front($bar.Handle); $box.Focus() })
 $pic.Add_MouseDown({ [LanceurNative]::Front($bar.Handle); $box.Focus() })
 $box.Add_MouseDown({ [LanceurNative]::Front($bar.Handle) })
 
-# Cacher les suggestions quand on clique ailleurs
-$bar.Add_Deactivate({ $pop.Hide() })
+# Clic ailleurs : vide la barre et cache les suggestions
+# (sauf un clic sur la liste elle-meme : il doit arriver jusqu'a elle pour lancer l'appli)
+$bar.Add_Deactivate({
+    if ($pop.Visible -and $pop.Bounds.Contains([Windows.Forms.Control]::MousePosition)) { return }
+    Reset-Bar
+})
 
 # Rester au-dessus de la barre des taches, et bien place
 $timer = New-Object Windows.Forms.Timer
 $timer.Interval = 500
 $script:cachee = $false
+$script:fenAvant = [IntPtr]::Zero
 $timer.Add_Tick({
+    $f = [LanceurNative]::OtherForeground(); if ($f -ne [IntPtr]::Zero) { $script:fenAvant = $f }
     # Plein ecran (film, jeu...) : la barre des taches s'efface, la barre de recherche aussi
     if ([LanceurNative]::FullscreenApp()) {
         if (-not $script:cachee) { $pop.Hide(); [LanceurNative]::Hide($bar.Handle); $script:cachee = $true }
@@ -407,18 +541,24 @@ $timer.Start()
 # Rafraichir la liste des apps toutes les 30 min, seulement quand on n'est pas en train de taper
 $refresh = New-Object Windows.Forms.Timer
 $refresh.Interval = 30 * 60 * 1000
-$refresh.Add_Tick({ if (-not $box.Focused) { Import-Apps; $script:icons = @{} } })
+$refresh.Add_Tick({ if (-not $box.Focused) { Import-Apps; Start-PrechargementIcones } })   # cache d'icones garde : seules les nouvelles sont chargees
 $refresh.Start()
 
-# Raccourci global Ctrl+Alt+Espace
+# Raccourci global Ctrl+Alt+Espace, et touche Windows seule (si activee en haut du fichier)
 $hk = New-Object LanceurNative
 [void]$hk.Register(0x0002 -bor 0x0001 -bor 0x4000, 0x20)   # CTRL | ALT | NOREPEAT, ESPACE
-$hk.add_HotKey({ if ($script:cachee) { [LanceurNative]::ShowNoActivate($bar.Handle); $script:cachee = $false }; $bar.Activate(); [LanceurNative]::Front($bar.Handle); $box.Focus(); $box.SelectAll() })
+if ($ToucheWindows) { $hk.StartWinKey() }
+$hk.add_HotKey({
+    $f = [LanceurNative]::OtherForeground(); if ($f -ne [IntPtr]::Zero) { $script:fenAvant = $f }
+    if ($script:cachee) { [LanceurNative]::ShowNoActivate($bar.Handle); $script:cachee = $false }
+    [LanceurNative]::Front($bar.Handle); $bar.Activate(); $box.Focus(); $box.SelectAll()
+})
 
 # Menu clic droit : quitter / modifier les alias
 $menu = New-Object Windows.Forms.ContextMenuStrip
 [void]$menu.Items.Add('Gerer les alias...', $null, { Reset-Bar; Show-AliasManager })
-[void]$menu.Items.Add('Actualiser la liste des apps', $null, { Import-Apps; $script:icons = @{} })
+[void]$menu.Items.Add('Ouvrir le dossier des raccourcis', $null, { Reset-Bar; Start-Process explorer.exe "`"$raccourcisDir`"" })
+[void]$menu.Items.Add('Actualiser la liste des apps', $null, { Import-Apps; $script:icons = @{}; $script:iconParChemin = @{}; Start-PrechargementIcones })
 [void]$menu.Items.Add('Quitter la barre', $null, { Write-Journal 'Quitter (menu)'; Set-Content $stopFlag '' -ErrorAction SilentlyContinue; $bar.Close() })
 $bar.ContextMenuStrip = $menu
 $box.ContextMenuStrip = $menu

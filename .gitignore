@@ -1,3 +1,7 @@
 # Alias personnels (crees automatiquement au premier lancement)
 alias.txt
 *.bak
+
+# Raccourcis perso (le dossier est garde grace a .gitkeep)
+raccourcis/*
+!raccourcis/.gitkeep
