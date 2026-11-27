@@ -190,11 +190,21 @@ function Import-Apps {
     $script:appsLoadedAt = Get-Date
     $script:aliasStamp = (Get-Item $aliasFile).LastWriteTime
     $script:raccourcisStamp = Get-RaccourcisStamp
+    $script:menuStamp = Get-MenuDemarrerStamp
 }
 
-# Recharge seulement si alias.txt ou le dossier raccourcis a change (la liste complete est rafraichie en tache de fond par la barre)
+# Change quand une appli de bureau ou une appli web (Chrome, Edge) est ajoutee ou retiree du menu Demarrer
+$dossiersDemarrer = @([Environment]::GetFolderPath('Programs'), [Environment]::GetFolderPath('CommonPrograms'))
+function Get-MenuDemarrerStamp {
+    (@(foreach ($d in $dossiersDemarrer) { Get-Item -LiteralPath $d -ErrorAction SilentlyContinue; Get-ChildItem -LiteralPath $d -Directory -Recurse -ErrorAction SilentlyContinue }) |
+        ForEach-Object { $_.LastWriteTimeUtc.Ticks } | Measure-Object -Maximum).Maximum
+}
+
+# Recharge seulement si alias.txt, le dossier raccourcis ou le menu Demarrer a change
+# (la liste complete, applis du Store comprises, est aussi rafraichie toutes les 30 min par la barre)
 function Update-AppsIfStale {
-    if ((Get-Item $aliasFile).LastWriteTime -ne $script:aliasStamp -or (Get-RaccourcisStamp) -ne $script:raccourcisStamp) { Import-Apps }
+    if ((Get-Item $aliasFile).LastWriteTime -ne $script:aliasStamp -or (Get-RaccourcisStamp) -ne $script:raccourcisStamp -or
+        (Get-MenuDemarrerStamp) -ne $script:menuStamp) { Import-Apps }
 }
 
 # Toujours entourer le resultat de @(...) : avec un seul resultat, PowerShell 5.1 renvoie l'objet seul
