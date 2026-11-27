@@ -5,6 +5,8 @@
 $Largeur       = 200     # largeur de la barre de recherche
 $MargeDroite   = 290     # utilise seulement si la zone de l'horloge est introuvable
 $ToucheWindows = $true   # appui seul sur la touche Windows = ouvre la barre (au lieu du menu Demarrer ; Ctrl+Echap l'ouvre toujours)
+$MasquerDemarrer = $false   # cache le bouton Demarrer de la barre des taches (toujours cache quand la barre est a gauche)
+# Gauche / droite : clic droit sur la barre (memorise dans %APPDATA%\Lanceur\reglages.json)
 # ----------------------------------------------------------
 
 # Une seule instance
@@ -153,6 +155,25 @@ public class LanceurNative : NativeWindow {
     [DllImport("user32.dll")] static extern bool ShowWindow(IntPtr h, int cmd);
     public static void Hide(IntPtr h) { ShowWindow(h, 0); }
     public static void ShowNoActivate(IntPtr h) { ShowWindow(h, 4); }
+    // Affiche / cache le bouton Demarrer de la barre des taches (le menu Demarrer s'ouvre toujours avec Ctrl+Echap).
+    // L'Explorateur peut le remontrer (barre des taches reconstruite, Explorateur redemarre) : la minuterie de la barre le refait.
+    // reserve : pixels laisses libres au bord gauche de la barre des taches (la barre elle-meme quand elle est a gauche), sinon 0.
+    // Ne marche qu'avec une barre des taches classique (fenetres "Start" et "ReBarWindow32", ex. ExplorerPatcher) ; sinon ne fait rien.
+    [DllImport("user32.dll")] static extern bool IsWindowVisible(IntPtr h);
+    public static bool StartButton(bool visible, int reserve) {
+        IntPtr t = FindWindow("Shell_TrayWnd", null); if (t == IntPtr.Zero) return false;
+        IntPtr s = FindWindowEx(t, IntPtr.Zero, "Start", null); if (s == IntPtr.Zero) return false;
+        if (IsWindowVisible(s) != visible) ShowWindow(s, visible ? 5 : 0);   // SW_SHOW / SW_HIDE
+        // Glisse la zone des applis (epinglees / ouvertes) a la place du bouton (ou apres la barre), ou la remet a cote du bouton.
+        RECT tr, sr, br;
+        IntPtr b = FindWindowEx(t, IntPtr.Zero, "ReBarWindow32", null);
+        if (b == IntPtr.Zero || !GetWindowRect(t, out tr) || !GetWindowRect(s, out sr) || !GetWindowRect(b, out br)) return true;
+        if (tr.R - tr.L < tr.B - tr.T) return true;   // barre des taches verticale : on ne touche pas
+        int left = visible ? sr.R : (reserve > 0 ? tr.L + reserve : sr.L);
+        if (br.L != left && br.R > left)
+            SetWindowPos(b, IntPtr.Zero, left - tr.L, br.T - tr.T, br.R - left, br.B - br.T, 0x0004 | 0x0010);   // NOZORDER | NOACTIVATE
+        return true;
+    }
     // Bord gauche de la zone horloge / icones systeme (0 si introuvable)
     public static int TrayLeft() {
         IntPtr t = FindWindow("Shell_TrayWnd", null); if (t == IntPtr.Zero) return 0;
@@ -206,6 +227,31 @@ Write-Journal "Demarrage (PID $PID)"
 . (Join-Path $PSScriptRoot 'LanceurCore.ps1')
 
 $g = [Drawing.Graphics]::FromHwnd([IntPtr]::Zero); $scale = $g.DpiX / 96; $g.Dispose()
+
+# Cote de la barre des taches ou se place la barre (menu clic droit), memorise dans %APPDATA%\Lanceur\reglages.json.
+# Haut / bas suit toujours la barre des taches.   Droite : a cote de l'horloge (defaut)   Gauche : a la place du bouton Demarrer
+$reglagesFile = Join-Path $env:APPDATA 'Lanceur\reglages.json'
+$script:cote = 'Droite'
+try { if ((Get-Content $reglagesFile -Raw -ErrorAction Stop | ConvertFrom-Json).Cote -eq 'Gauche') { $script:cote = 'Gauche' } } catch {}
+function Set-Cote([string]$c) {
+    $script:cote = $c
+    try { @{ Cote = $c } | ConvertTo-Json | Set-Content -Encoding UTF8 $reglagesFile } catch {}
+    Write-Journal "Position : $c"
+    Update-Layout; Update-BoutonDemarrer
+}
+
+# Bouton Demarrer : cache quand la barre prend sa place (gauche) ou si $MasquerDemarrer est active.
+# Les applis epinglees / ouvertes glissent alors a gauche : a la place du bouton, ou juste apres la barre.
+$script:demarrerCache = $false
+function Update-BoutonDemarrer {
+    if ($script:cote -eq 'Gauche') {
+        $script:demarrerCache = [LanceurNative]::StartButton($false, $bar.Right - $script:tbLeft + [int](6 * $scale))
+    } elseif ($MasquerDemarrer) {
+        $script:demarrerCache = [LanceurNative]::StartButton($false, 0)
+    } elseif ($script:demarrerCache) {
+        [void][LanceurNative]::StartButton($true, 0); $script:demarrerCache = $false
+    }
+}
 $bg     = [Drawing.Color]::FromArgb(45, 45, 45)
 $bgPop  = [Drawing.Color]::FromArgb(32, 32, 32)
 $selCol = [Drawing.Color]::FromArgb(60, 90, 140)
@@ -309,9 +355,14 @@ function Update-Layout {
     $script:tbEnHaut = $enHaut; $script:tbBottom = $tb.Bottom
     $w = [int]($Largeur * $scale)
     $h = [int]([Math]::Min($tb.Height * 0.66, 36 * $scale))
-    $right = [LanceurNative]::TrayLeft()
-    if ($right -le $tb.Left + $w -or $right -gt $tb.Right) { $right = $tb.Right - [int]($MargeDroite * $scale) }
-    $x = $right - $w - [int](8 * $scale)
+    $script:tbLeft = $tb.Left
+    if ($script:cote -eq 'Gauche') {
+        $x = $tb.Left + [int](6 * $scale)   # a la place du bouton Demarrer
+    } else {
+        $right = [LanceurNative]::TrayLeft()
+        if ($right -le $tb.Left + $w -or $right -gt $tb.Right) { $right = $tb.Right - [int]($MargeDroite * $scale) }
+        $x = $right - $w - [int](8 * $scale)
+    }
     $y = $tb.Top + [int](($tb.Height - $h) / 2)
     $want = New-Object Drawing.Rectangle($x, $y, $w, $h)
     $key = "$x,$y,$w,$h,$($tb.Top)"
@@ -535,6 +586,7 @@ $timer.Add_Tick({
     Update-Layout
     [LanceurNative]::AttachToTaskbar($bar.Handle)   # refait si l'Explorateur a redemarre
     [LanceurNative]::KeepOnTop($bar.Handle)
+    Update-BoutonDemarrer   # refait si l'Explorateur a remis le bouton ou reorganise la barre des taches
 })
 $timer.Start()
 
@@ -559,6 +611,11 @@ $menu = New-Object Windows.Forms.ContextMenuStrip
 [void]$menu.Items.Add('Gerer les alias...', $null, { Reset-Bar; Show-AliasManager })
 [void]$menu.Items.Add('Ouvrir le dossier des raccourcis', $null, { Reset-Bar; Start-Process explorer.exe "`"$raccourcisDir`"" })
 [void]$menu.Items.Add('Actualiser la liste des apps', $null, { Import-Apps; $script:icons = @{}; $script:iconParChemin = @{}; Start-PrechargementIcones })
+[void]$menu.Items.Add('-')
+$miGauche = $menu.Items.Add('A gauche', $null, { Set-Cote 'Gauche' })
+$miDroite = $menu.Items.Add('A droite', $null, { Set-Cote 'Droite' })
+$menu.Add_Opening({ $miGauche.Checked = $script:cote -eq 'Gauche'; $miDroite.Checked = $script:cote -eq 'Droite' })   # coche le cote actuel
+[void]$menu.Items.Add('-')
 [void]$menu.Items.Add('Quitter la barre', $null, { Write-Journal 'Quitter (menu)'; Set-Content $stopFlag '' -ErrorAction SilentlyContinue; $bar.Close() })
 $bar.ContextMenuStrip = $menu
 $box.ContextMenuStrip = $menu
@@ -566,5 +623,6 @@ $pic.ContextMenuStrip = $menu
 
 try { [Windows.Forms.Application]::Run($bar) }
 catch { Write-Journal "Arret sur erreur : $($_.Exception.Message)" }
+if ($script:demarrerCache) { [void][LanceurNative]::StartButton($true, 0) }   # rend le bouton Demarrer quand la barre se ferme
 Write-Journal 'Arret'
 $mutex.ReleaseMutex()

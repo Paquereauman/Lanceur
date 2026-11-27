@@ -14,7 +14,7 @@ PowerShell 5.1 that ships with Windows. The interface is in French.
   (Indexing Options, "Show hidden files and folders"...), common Settings pages (Display, Wi-Fi, Default apps...,
   also found by French words: `affichage`, `son`, `imprimantes`...) and anything in the `raccourcis` folder.
   Non-app results carry a small grey tag (*Parametres*, *Tache*, *Raccourci*...). It matches the start of the
-  name, any word (`wifi` finds *Wi-Fi*), initials (`vsc`), or letters in order, and ignores accents.
+  name, any word (`wifi` finds *Wi-Fi*), initials (`vsc`), or letters in order from the start of a word (`ntpd` → Notepad), and ignores accents.
   Ranking runs in C# (< 1 ms per keystroke).
 - **App icons** in the suggestions, and the selected app's icon in the box itself.
 - **Learns what you use**: frequently launched apps move to the top.
@@ -25,7 +25,10 @@ PowerShell 5.1 that ships with Windows. The interface is in French.
 - Paths, URLs and commands work too.
 - **Windows key**: tap it alone to open the bar instead of the Start menu (Win+E and other shortcuts still
   work, Ctrl+Esc opens Start). Global hotkey **Ctrl+Alt+Space** too.
-- Works with the taskbar at the top or bottom of the screen.
+- Works with the taskbar at the top or bottom of the screen, on the **right** (next to the clock) or the
+  **left** (in place of the Start button): right-click the bar → *A gauche* / *A droite*.
+- Can hide the taskbar's Start button (`$MasquerDemarrer`); the Start menu still opens with **Ctrl+Esc**.
+  Only works with a classic taskbar (e.g. ExplorerPatcher); on the stock Windows 11 taskbar it does nothing.
 - Icons are preloaded in the background, so suggestions always appear instantly.
 - Stays on top of the taskbar (even when the Start menu opens) and repositions itself when the
   taskbar or screen changes.
@@ -65,6 +68,7 @@ to the old folder and re-registers it.
 | Delete the last word | **Ctrl+Backspace** |
 | Create an alias | `alias=app name`, then Enter |
 | Manage aliases | `:alias`, or right-click the bar |
+| Move the bar left / right | right-click the bar → *A gauche* / *A droite* |
 | Refresh the app list / quit | right-click the bar |
 
 ## Settings
@@ -75,7 +79,11 @@ At the top of `LanceurBarre.ps1`:
 $Largeur       = 200     # width of the search box (logical pixels)
 $MargeDroite   = 290     # only used if the clock area can't be found
 $ToucheWindows = $true   # tap the Windows key alone to open the bar ($false = normal Start menu)
+$MasquerDemarrer = $false # hide the taskbar's Start button
 ```
+
+The left / right position is chosen from the right-click menu and saved in `%APPDATA%\Lanceureglages.json`.
+On the left, the Start button is hidden (the bar takes its place) and comes back when the bar is closed.
 
 ## Files
 

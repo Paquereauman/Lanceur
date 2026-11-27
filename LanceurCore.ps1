@@ -57,9 +57,15 @@ public static class LanceurSearch {
         foreach (var w in words) ini.Append(w[0]);
         if (q.Length >= 2 && ini.ToString().StartsWith(q, StringComparison.Ordinal)) return 450;   // "vsc" -> Visual Studio Code
         if (n.IndexOf(q, StringComparison.Ordinal) >= 0) return 150;   // au milieu d'un mot (faible)
-        int i = 0;
-        foreach (char c in n) if (i < q.Length && c == q[i]) i++;
-        return i == q.Length ? 100 : 0;   // lettres dans l'ordre (faible)
+        // lettres dans l'ordre (faible), a partir du debut d'un mot : "ntpd" -> Notepad,
+        // mais pas "sarv" -> windowS AdministRatiVe Tools (lettres piochees n'importe ou dans un nom long)
+        for (int p = 0; p < n.Length; p++) {
+            if (n[p] != q[0] || (p > 0 && Array.IndexOf(Sep, n[p - 1]) < 0)) continue;
+            int i = 0;
+            for (int k = p; k < n.Length && i < q.Length; k++) if (n[k] == q[i]) i++;
+            if (i == q.Length) return 100;
+        }
+        return 0;
     }
     // aliases[i] = alias separes par '|'
     // bonus[i] = decalage de classement selon le type (applis 0, taches du Panneau de configuration negatif...)
