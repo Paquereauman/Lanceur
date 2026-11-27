@@ -143,10 +143,26 @@ function New-Entree($name, $id, $type, $target = $null, $iconPath = $null, $shel
 }
 
 function Import-Apps {
-    $list = @(Get-StartApps | Where-Object { $_.Name -and $_.AppID } | Sort-Object Name -Unique | ForEach-Object { New-Entree $_.Name $_.AppID 'Appli' })
+    $list = @(Get-StartApps | Where-Object { $_.Name -and $_.AppID } | Sort-Object Name -Unique | ForEach-Object {
+        # Applis web installees depuis un navigateur ("Brave._crx_...", "Chrome._crx_...") : etiquette = le navigateur,
+        # et le nom du navigateur fait partie de la recherche ("brave" les liste toutes)
+        if ($_.AppID -match '^(Brave|Chrome|Chromium|MSEdge|Edge|Vivaldi|Opera)[^.]*\._crx_') {
+            $nav = @{ 'msedge' = 'Edge' }[$Matches[1].ToLower()]; if (-not $nav) { $nav = $Matches[1] }
+            $e = New-Entree $_.Name $_.AppID $nav
+            $e.Key = ConvertTo-Key "$($_.Name) $nav"
+            $e
+        } else { New-Entree $_.Name $_.AppID 'Appli' }
+    })
     $pris = @{}; foreach ($a in $list) { $pris[$a.Key] = $true }
     # Raccourcis perso : nom = nom du fichier sans extension ("Compta.lnk" -> "Compta")
-    foreach ($f in Get-Raccourcis) { $list += New-Entree $f.BaseName $f.FullName 'Raccourci' $f.FullName }
+    # Dans un sous-dossier ("raccourcis\Brave\Banque.url") : etiquette = nom du sous-dossier, qui fait partie de la recherche
+    foreach ($f in Get-Raccourcis) {
+        $rel = $f.FullName.Substring($raccourcisDir.Length).TrimStart('\')
+        $dossier = if ($rel.Contains('\')) { $rel.Split('\')[0] } else { $null }
+        $e = New-Entree $f.BaseName $f.FullName $(if ($dossier) { $dossier } else { 'Raccourci' }) $f.FullName
+        if ($dossier) { $e.Key = ConvertTo-Key "$($f.BaseName) $dossier" }
+        $list += $e
+    }
     # Elements (Options d'indexation, Options d'alimentation...) et taches ("Change how your mouse works"...)
     # du Panneau de configuration, comme la recherche Windows. Ouverts via leur element shell (thread STA requis : c'est le cas).
     try {

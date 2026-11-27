@@ -22,6 +22,10 @@ PowerShell 5.1 that ships with Windows. The interface is in French.
   Right-click a suggestion → *Donner un alias à cette appli*, or type `:alias` to open the alias manager.
 - **Your own shortcuts**: drop any `.lnk`, `.url`, `.exe` or document into the `raccourcis` folder
   (right-click the bar → *Ouvrir le dossier des raccourcis*) and it shows up under its file name.
+  Put them in subfolders to sort them: `raccourcis\Travail\Compta.lnk` is tagged *Travail*, and typing
+  `travail` lists everything in that folder.
+- **Web apps sorted by browser**: sites installed as apps from Brave, Chrome, Edge… are tagged with their
+  browser, and typing `brave` lists your Brave apps.
 - Paths, URLs and commands work too.
 - **Windows key**: tap it alone to open the bar instead of the Start menu (Win+E and other shortcuts still
   work, Ctrl+Esc opens Start). Global hotkey **Ctrl+Alt+Space** too.
@@ -82,7 +86,8 @@ $ToucheWindows = $true   # tap the Windows key alone to open the bar ($false = n
 $MasquerDemarrer = $false # hide the taskbar's Start button
 ```
 
-The left / right position is chosen from the right-click menu and saved in `%APPDATA%\Lanceureglages.json`.
+The left / right position is chosen from the right-click menu and saved in `%APPDATA%\Lanceur
+eglages.json`.
 On the left, the Start button is hidden (the bar takes its place) and comes back when the bar is closed.
 
 ## Files
