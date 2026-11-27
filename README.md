@@ -20,6 +20,7 @@ PowerShell 5.1 that ships with Windows. The interface is in French.
 - Global hotkey **Ctrl+Alt+Space**.
 - Stays on top of the taskbar (even when the Start menu opens) and repositions itself when the
   taskbar or screen changes.
+- Hides with the taskbar when an app goes full screen (videos, games, slideshows) and comes back afterwards.
 - Restarts automatically if it is ever closed by accident.
 
 ## Install

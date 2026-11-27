@@ -66,6 +66,28 @@ public class LanceurNative : NativeWindow {
         IntPtr t = FindWindow("Shell_TrayWnd", null);
         if (t != IntPtr.Zero && GetWindowLongPtr(h, -8) != t) SetWindowLongPtr(h, -8, t);   // GWLP_HWNDPARENT
     }
+    // Une fenetre (film, jeu, diaporama...) est-elle en plein ecran sur l'ecran principal ?
+    [DllImport("user32.dll")] static extern IntPtr GetForegroundWindow();
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern int GetClassName(IntPtr h, System.Text.StringBuilder s, int n);
+    [DllImport("user32.dll")] static extern IntPtr MonitorFromWindow(IntPtr h, uint f);
+    [StructLayout(LayoutKind.Sequential)] struct MONITORINFO { public int cbSize; public RECT rcMonitor, rcWork; public uint dwFlags; }
+    [DllImport("user32.dll")] static extern bool GetMonitorInfo(IntPtr m, ref MONITORINFO mi);
+    [DllImport("user32.dll")] static extern uint GetWindowThreadProcessId(IntPtr h, out uint pid);
+    public static bool FullscreenApp() {
+        IntPtr f = GetForegroundWindow(); if (f == IntPtr.Zero) return false;
+        uint pid; GetWindowThreadProcessId(f, out pid);
+        if (pid == (uint)System.Diagnostics.Process.GetCurrentProcess().Id) return false;
+        var cls = new System.Text.StringBuilder(64); GetClassName(f, cls, 64);
+        string c = cls.ToString();
+        if (c == "Progman" || c == "WorkerW" || c == "Shell_TrayWnd" || c == "Shell_SecondaryTrayWnd" || c == "Windows.UI.Core.CoreWindow") return false;
+        RECT r; if (!GetWindowRect(f, out r)) return false;
+        var mi = new MONITORINFO(); mi.cbSize = Marshal.SizeOf(typeof(MONITORINFO));
+        if (!GetMonitorInfo(MonitorFromWindow(f, 2), ref mi) || (mi.dwFlags & 1) == 0) return false;   // ecran principal seulement
+        return r.L <= mi.rcMonitor.L && r.T <= mi.rcMonitor.T && r.R >= mi.rcMonitor.R && r.B >= mi.rcMonitor.B;
+    }
+    [DllImport("user32.dll")] static extern bool ShowWindow(IntPtr h, int cmd);
+    public static void Hide(IntPtr h) { ShowWindow(h, 0); }
+    public static void ShowNoActivate(IntPtr h) { ShowWindow(h, 4); }
     // Bord gauche de la zone horloge / icones systeme (0 si introuvable)
     public static int TrayLeft() {
         IntPtr t = FindWindow("Shell_TrayWnd", null); if (t == IntPtr.Zero) return 0;
@@ -368,7 +390,14 @@ $bar.Add_Deactivate({ $pop.Hide() })
 # Rester au-dessus de la barre des taches, et bien place
 $timer = New-Object Windows.Forms.Timer
 $timer.Interval = 500
+$script:cachee = $false
 $timer.Add_Tick({
+    # Plein ecran (film, jeu...) : la barre des taches s'efface, la barre de recherche aussi
+    if ([LanceurNative]::FullscreenApp()) {
+        if (-not $script:cachee) { $pop.Hide(); [LanceurNative]::Hide($bar.Handle); $script:cachee = $true }
+        return
+    }
+    if ($script:cachee) { [LanceurNative]::ShowNoActivate($bar.Handle); $script:cachee = $false }
     Update-Layout
     [LanceurNative]::AttachToTaskbar($bar.Handle)   # refait si l'Explorateur a redemarre
     [LanceurNative]::KeepOnTop($bar.Handle)
@@ -384,7 +413,7 @@ $refresh.Start()
 # Raccourci global Ctrl+Alt+Espace
 $hk = New-Object LanceurNative
 [void]$hk.Register(0x0002 -bor 0x0001 -bor 0x4000, 0x20)   # CTRL | ALT | NOREPEAT, ESPACE
-$hk.add_HotKey({ $bar.Activate(); [LanceurNative]::Front($bar.Handle); $box.Focus(); $box.SelectAll() })
+$hk.add_HotKey({ if ($script:cachee) { [LanceurNative]::ShowNoActivate($bar.Handle); $script:cachee = $false }; $bar.Activate(); [LanceurNative]::Front($bar.Handle); $box.Focus(); $box.SelectAll() })
 
 # Menu clic droit : quitter / modifier les alias
 $menu = New-Object Windows.Forms.ContextMenuStrip
