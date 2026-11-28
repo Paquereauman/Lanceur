@@ -524,6 +524,8 @@ $bar.StartPosition = 'Manual'
 $bar.TopMost = $true
 $bar.BackColor = $bg
 $bar.MinimumSize = New-Object Drawing.Size(1, 1)
+# Ni agrandie ni reduite (Windows+Haut l'agrandissait en plein ecran : elle ne laissait plus voir qu'un coin en haut)
+$bar.MaximizeBox = $false; $bar.MinimizeBox = $false
 
 $pic = New-Object Windows.Forms.PictureBox
 $pic.SizeMode = 'Zoom'
@@ -792,6 +794,8 @@ $timer.Add_Tick({
         return
     }
     if ($script:cachee) { [LanceurNative]::ShowNoActivate($bar.Handle); $script:cachee = $false }
+    # Agrandie ou reduite malgre tout (raccourci Windows, autre logiciel) : on la remet normale, puis a sa place
+    if ($bar.WindowState -ne 'Normal') { $bar.WindowState = 'Normal'; $script:lay = $null; Write-Journal "Remise en taille normale (Windows l'avait agrandie ou reduite)" }
     Update-Layout
     [LanceurNative]::AttachToTaskbar($bar.Handle)   # refait si l'Explorateur a redemarre
     [LanceurNative]::KeepOnTop($bar.Handle)
