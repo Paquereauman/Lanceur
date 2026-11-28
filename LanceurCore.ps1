@@ -351,8 +351,13 @@ function Get-NomSite([string]$cible) {
     $parts = @($h -split '\.' | Where-Object { $_ })
     $i = 0; while ($i -lt $parts.Count - 2 -and $parts[$i] -in $sousDomainesGeneriques) { $i++ }
     $mot = $parts[$i]; if (-not $mot) { return $null }
-    if ($nomsConnus[$mot]) { return $nomsConnus[$mot] }
-    $mot.Substring(0, 1).ToUpper() + $mot.Substring(1)
+    $nom = if ($nomsConnus[$mot]) { $nomsConnus[$mot] } else { $mot.Substring(0, 1).ToUpper() + $mot.Substring(1) }
+    # Plusieurs vues d'un meme site (?view=planner, ?view=grades) : la vue s'ajoute au nom ("Cockpit · Planner")
+    if ($u -match '[?&](view|page|tab)=([^&#]+)') {
+        $v = [uri]::UnescapeDataString($Matches[2]) -replace '[-_+]', ' '
+        if ($v) { $nom += ' · ' + $v.Substring(0, 1).ToUpper() + $v.Substring(1) }
+    }
+    $nom
 }
 
 # Applique alias.txt a la liste des applis deja chargee (sans relire le menu Demarrer ni le Panneau de configuration)
