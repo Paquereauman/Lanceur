@@ -389,6 +389,21 @@ function Get-AppLabel($a) {
 }
 
 # Lance l'appli (ou, si $app est vide, le texte tape : chemin, URL, commande). Renvoie $true si OK.
+# Cible -> programme et arguments. Un chemin qui existe, une URL ou un lien (ms-settings:...) reste entier ;
+# sinon : programme puis arguments, par exemple  "C:\Program Files\BraveSoftware\Brave-Browser\Application\brave.exe" https://www.youtube.com
+function Split-Commande([string]$cible) {
+    $x = [Environment]::ExpandEnvironmentVariables($cible.Trim())
+    if ((Test-Path -LiteralPath $x -ErrorAction SilentlyContinue) -or ($x -match '^[a-z][a-z0-9+.-]*:' -and $x -notmatch '^[a-z]:\\')) { return @($x, '') }
+    if ($x -match '^"([^"]+)"\s*(.*)$') { return @($Matches[1], $Matches[2].Trim()) }
+    if ($x -match '^(\S+)\s+(.+)$') { return @($Matches[1], $Matches[2].Trim()) }
+    @($x, '')
+}
+# Lance une cible (chemin, URL, ou programme avec arguments)
+function Start-Cible([string]$cible) {
+    $prog, $args2 = Split-Commande $cible
+    if ($args2) { Start-Process -FilePath $prog -ArgumentList $args2 } else { Start-Process -FilePath $prog }
+}
+
 function Invoke-Launch($app, [string]$text) {
     $text = $text.Trim()
     try {
@@ -398,7 +413,7 @@ function Invoke-Launch($app, [string]$text) {
             if ($app.Type -eq 'Action') { & $actions[$app.Id].Faire }                              # action integree
             elseif ($app.Shell) { $app.Shell.InvokeVerb() }                                              # Panneau de configuration
             elseif ($app.Type -eq 'Parametres') { [void][Diagnostics.Process]::Start($app.Target) }   # page ms-settings:
-            elseif ($app.Target) { Start-Process $app.Target }
+            elseif ($app.Target) { Start-Cible $app.Target }
             else { Start-Process explorer.exe "shell:AppsFolder\$($app.Id)" }
             $script:hist[$app.Id] = [int]$script:hist[$app.Id] + 1
             $script:hits[$app.Idx] = $script:hist[$app.Id]
@@ -568,7 +583,8 @@ function Test-AliasCible([string]$c) {
     if ($x -match '^[a-z][a-z0-9+.-]*:' -and $x -notmatch '^[a-z]:\\') { return $true }   # URL, ms-settings:, mailto:...
     if ($x -match '^www\.') { return $true }
     if (Test-Path -LiteralPath $x -ErrorAction SilentlyContinue) { return $true }
-    [bool](Get-Command ($x -split ' ')[0] -CommandType Application -ErrorAction SilentlyContinue)
+    $prog = (Split-Commande $c)[0]
+    (Test-Path -LiteralPath $prog -ErrorAction SilentlyContinue) -or [bool](Get-Command $prog -CommandType Application -ErrorAction SilentlyContinue)
 }
 function Set-AliasLigneEtat($r) {
     $ok = Test-AliasCible "$($r.Cells[2].Value)"

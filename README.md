@@ -42,6 +42,11 @@ PowerShell 5.1 that ships with Windows. The interface is in French.
 - An alias with a partial name (`wi = Wi-F`) also finds shortcuts, Settings pages, games and actions.
 - Dark right-click menus.
 - Paths, URLs and commands work too.
+- **Site icons**: an alias that opens a web site (`yt = https://www.youtube.com`, or a browser followed by a URL)
+  shows the site's own icon. It's downloaded once from the site itself (favicon.ico, apple-touch-icon.png, or the
+  icon the home page declares), in the background, and kept in `%APPDATA%\Lanceur\favicons`.
+- **Program + arguments** as an alias target: `yt = "C:\Program Files\BraveSoftware\Brave-Browser\Application\brave.exe" https://www.youtube.com`
+  opens YouTube in a new Brave tab even if another browser is the default.
 - **Windows key**: tap it alone to open the bar instead of the Start menu (Win+E and other shortcuts still
   work, Ctrl+Esc opens Start). Global hotkey **Ctrl+Alt+Space** too.
 - Works with the taskbar at the top or bottom of the screen, on the **right** (next to the clock) or the

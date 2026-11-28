@@ -345,15 +345,107 @@ $brSel  = New-Object Drawing.SolidBrush($selCol)
 $script:icons = @{}
 $script:iconParChemin = @{}
 $iconPx = [int](32 * $scale)
+# ---- Icones des sites (alias vers une URL) ----
+# L'icone du site est telechargee une fois, directement depuis le site (favicon.ico, sinon apple-touch-icon.png),
+# en arriere-plan, puis gardee dans %APPDATA%\Lanceur\favicons. En attendant : l'icone du navigateur.
+$faviconsDir = Join-Path $env:APPDATA 'Lanceur\favicons'
+New-Item -ItemType Directory -Force $faviconsDir | Out-Null
+[Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
+$script:faviconTaches = @{}   # site -> @{ Tache; Client; Essai }
+$script:faviconEchecs = @{}   # sites sans icone recuperable (on ne reessaie pas avant le prochain demarrage)
+# Essais dans l'ordre ; "page" : lit la page d'accueil pour trouver l'icone qu'elle declare (<link rel="icon" href=...>)
+$faviconEssais = @('/favicon.ico', '/apple-touch-icon.png', 'page')
+
+# Site vise par une entree : sa cible est une URL, ou un programme suivi d'une URL ("brave.exe" https://...)
+function Get-SiteHote($a) {
+    if (-not $a.Target -or $a.Type -eq 'Parametres') { return $null }
+    $prog, $arg = Split-Commande $a.Target
+    $u = if ($prog -match '^https?://') { $prog } elseif ($arg -match '^(https?://\S+)') { $Matches[1] } else { $null }
+    if (-not $u) { return $null }
+    try { ([uri]$u).Host } catch { $null }
+}
+function Get-FaviconFichier([string]$hote) {
+    foreach ($ext in 'png', 'ico') { $f = Join-Path $faviconsDir "$hote.$ext"; if (Test-Path -LiteralPath $f) { return $f } }
+    $null
+}
+function Read-Favicon([string]$f) {
+    try {
+        if ($f.EndsWith('.ico')) { $ico = New-Object Drawing.Icon($f, $iconPx, $iconPx); return $ico.ToBitmap() }
+        [LanceurIcon]::FromPicture($f, $iconPx)
+    } catch { $null }
+}
+function Start-Favicon([string]$hote, [int]$essai = 0) {
+    if ($essai -ge $faviconEssais.Count) { $script:faviconEchecs[$hote] = $true; $script:faviconTaches.Remove($hote); return }
+    $e = $faviconEssais[$essai]
+    if ($e -eq 'page') { Start-FaviconTelechargement $hote "https://$hote/" $essai $true }
+    else { Start-FaviconTelechargement $hote "https://$hote$e" $essai $false }
+}
+# $page : on telecharge la page (texte) pour y lire l'adresse de l'icone, pas l'icone elle-meme
+function Start-FaviconTelechargement([string]$hote, [string]$url, [int]$essai, [bool]$page) {
+    $wc = New-Object Net.WebClient
+    $wc.Headers['User-Agent'] = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Lanceur'; $wc.Encoding = [Text.Encoding]::UTF8
+    $tache = if ($page) { $wc.DownloadStringTaskAsync($url) } else { $wc.DownloadDataTaskAsync($url) }
+    $script:faviconTaches[$hote] = @{ Tache = $tache; Client = $wc; Essai = $essai; Page = $page; Url = $url }
+    $faviconMinuterie.Start()
+}
+# Verifie les telechargements en cours (sur le fil de l'interface : rien a synchroniser)
+$faviconMinuterie = New-Object Windows.Forms.Timer
+$faviconMinuterie.Interval = 400
+$faviconMinuterie.Add_Tick({
+    foreach ($hote in @($script:faviconTaches.Keys)) {
+        $t = $script:faviconTaches[$hote]
+        if (-not $t.Tache.IsCompleted) { continue }
+        $resultat = if ($t.Tache.Status -eq 'RanToCompletion') { $t.Tache.Result } else { $null }
+        $t.Client.Dispose()
+        if ($t.Page) {
+            # Page d'accueil : adresse de l'icone declaree (<link rel="icon" href=...>), puis on la telecharge
+            $href = $null
+            if ($resultat) {
+                foreach ($m in [regex]::Matches($resultat, '<link[^>]+>')) {
+                    if ($m.Value -match 'rel\s*=\s*"?[^">]*icon' -and $m.Value -match 'href\s*=\s*"([^"]+)"') { $href = [Net.WebUtility]::HtmlDecode($Matches[1]); break }
+                }
+            }
+            if ($href) { try { Start-FaviconTelechargement $hote ([string](New-Object Uri((New-Object Uri $t.Url), $href))) ($t.Essai + 1) $false; continue } catch {} }
+            Start-Favicon $hote ($t.Essai + 1); continue
+        }
+        $octets = $resultat
+        $ok = $false
+        if ($octets -and $octets.Length -gt 60) {
+            $png = $octets[0] -eq 0x89 -and $octets[1] -eq 0x50
+            $f = Join-Path $faviconsDir "$hote.$(if ($png) { 'png' } else { 'ico' })"
+            [IO.File]::WriteAllBytes($f, $octets)
+            if (Read-Favicon $f) { $ok = $true } else { Remove-Item -LiteralPath $f -ErrorAction SilentlyContinue }
+        }
+        if ($ok) {
+            $script:faviconTaches.Remove($hote)
+            # les entrees de ce site reprennent leur icone au prochain dessin
+            foreach ($a in $script:apps) { if ($a.Target -and (Get-SiteHote $a) -eq $hote) { $script:icons.Remove($a.Id) } }
+            $list.Invalidate(); Update-BarIcon
+            Write-Journal "Icone du site recuperee : $hote"
+        } else { Start-Favicon $hote ($t.Essai + 1) }
+    }
+    if (-not $script:faviconTaches.Count) { $faviconMinuterie.Stop() }
+})
+
 function Get-AppIcon($a) {
     if (-not $a) { return $null }
     if ($script:icons.ContainsKey($a.Id)) { return $script:icons[$a.Id] }
+    $hote = Get-SiteHote $a
+    if ($hote) {
+        $f = Get-FaviconFichier $hote
+        if ($f) { $img = Read-Favicon $f; if ($img) { $script:icons[$a.Id] = $img; return $img } }
+        elseif (-not $script:faviconEchecs[$hote] -and -not $script:faviconTaches.ContainsKey($hote)) { Start-Favicon $hote }
+    }
     $path = $null
     if ($a.IconPath) { $path = $a.IconPath }   # Panneau de configuration / Parametres
     elseif ($a.Target) {
         $t = [Environment]::ExpandEnvironmentVariables($a.Target)
         if (Test-Path -LiteralPath $t -ErrorAction SilentlyContinue) { $path = (Resolve-Path -LiteralPath $t).Path }
-        else { $cmd = Get-Command $t -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1; if ($cmd) { $path = $cmd.Source } }
+        else {
+            $prog = (Split-Commande $t)[0]   # programme avec arguments ("brave.exe" https://...) : icone du programme
+            if (Test-Path -LiteralPath $prog -ErrorAction SilentlyContinue) { $path = $prog }
+            else { $cmd = Get-Command $prog -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1; if ($cmd) { $path = $cmd.Source } }
+        }
     } else { $path = "shell:AppsFolder\$($a.Id)" }
     # Meme fichier d'icone pour beaucoup d'entrees (taches, pages Parametres) : extrait une seule fois
     if ($path -and $script:iconParChemin.ContainsKey($path)) { $img = $script:iconParChemin[$path] }
