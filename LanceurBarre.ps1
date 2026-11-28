@@ -353,17 +353,23 @@ New-Item -ItemType Directory -Force $faviconsDir | Out-Null
 [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
 $script:faviconTaches = @{}   # site -> @{ Tache; Client; Essai }
 $script:faviconEchecs = @{}   # sites sans icone recuperable (on ne reessaie pas avant le prochain demarrage)
-# Essais dans l'ordre ; "page" : lit la page d'accueil pour trouver l'icone qu'elle declare (<link rel="icon" href=...>)
-$faviconEssais = @('/favicon.ico', '/apple-touch-icon.png', 'page')
+# Essais dans l'ordre :
+#   dossier : favicon.ico dans le dossier de la page (outlook.live.com/mail/favicon.ico : la racine refuse)
+#   /favicon.ico, /apple-touch-icon.png : a la racine du site
+#   page, accueil : lit la page visee, puis la page d'accueil, pour trouver l'icone declaree (<link rel="icon" href=...>)
+#   parent : en dernier, favicon.ico du domaine principal (app.proxy-cheap.com bloque, proxy-cheap.com repond)
+$faviconEssais = @('dossier', '/favicon.ico', '/apple-touch-icon.png', 'page', 'accueil', 'parent')
+$script:faviconUrl = @{}   # site -> adresse complete visee par l'alias
+[Net.ServicePointManager]::Expect100Continue = $false
 
-# Site vise par une entree : sa cible est une URL, ou un programme suivi d'une URL ("brave.exe" https://...)
-function Get-SiteHote($a) {
+# Adresse visee par une entree : sa cible est une URL, ou un programme suivi d'une URL ("brave.exe" https://...)
+function Get-SiteUrl($a) {
     if (-not $a.Target -or $a.Type -eq 'Parametres') { return $null }
     $prog, $arg = Split-Commande $a.Target
-    $u = if ($prog -match '^https?://') { $prog } elseif ($arg -match '^(https?://\S+)') { $Matches[1] } else { $null }
-    if (-not $u) { return $null }
-    try { ([uri]$u).Host } catch { $null }
+    $u = if ($prog -match '^https?://') { $prog } elseif ($arg -match '^(https?://\S+)') { $Matches[1] } else { return $null }
+    try { [uri]$u } catch { $null }
 }
+function Get-SiteHote($a) { $u = Get-SiteUrl $a; if ($u) { $u.Host } }
 function Get-FaviconFichier([string]$hote) {
     foreach ($ext in 'png', 'ico') { $f = Join-Path $faviconsDir "$hote.$ext"; if (Test-Path -LiteralPath $f) { return $f } }
     $null
@@ -377,8 +383,22 @@ function Read-Favicon([string]$f) {
 function Start-Favicon([string]$hote, [int]$essai = 0) {
     if ($essai -ge $faviconEssais.Count) { $script:faviconEchecs[$hote] = $true; $script:faviconTaches.Remove($hote); return }
     $e = $faviconEssais[$essai]
-    if ($e -eq 'page') { Start-FaviconTelechargement $hote "https://$hote/" $essai $true }
-    else { Start-FaviconTelechargement $hote "https://$hote$e" $essai $false }
+    $u = $script:faviconUrl[$hote]; if (-not $u) { $u = [uri]"https://$hote/" }
+    switch ($e) {
+        'dossier' {
+            $dossier = $u.AbsolutePath.Substring(0, $u.AbsolutePath.LastIndexOf('/') + 1)
+            if ($dossier -eq '/') { Start-Favicon $hote ($essai + 1) }   # deja la racine : essai suivant
+            else { Start-FaviconTelechargement $hote "https://$hote$($dossier)favicon.ico" $essai $false }
+        }
+        'parent'  {
+            $parts = $hote -split '\.'
+            if ($parts.Count -gt 2) { Start-FaviconTelechargement $hote "https://$(($parts[-2..-1]) -join '.')/favicon.ico" $essai $false }
+            else { Start-Favicon $hote ($essai + 1) }
+        }
+        'page'    { Start-FaviconTelechargement $hote ([string]$u) $essai $true }
+        'accueil' { if ($u.AbsolutePath -eq '/') { Start-Favicon $hote ($essai + 1) } else { Start-FaviconTelechargement $hote "https://$hote/" $essai $true } }
+        default   { Start-FaviconTelechargement $hote "https://$hote$e" $essai $false }
+    }
 }
 # $page : on telecharge la page (texte) pour y lire l'adresse de l'icone, pas l'icone elle-meme
 function Start-FaviconTelechargement([string]$hote, [string]$url, [int]$essai, [bool]$page) {
@@ -405,7 +425,7 @@ $faviconMinuterie.Add_Tick({
                     if ($m.Value -match 'rel\s*=\s*"?[^">]*icon' -and $m.Value -match 'href\s*=\s*"([^"]+)"') { $href = [Net.WebUtility]::HtmlDecode($Matches[1]); break }
                 }
             }
-            if ($href) { try { Start-FaviconTelechargement $hote ([string](New-Object Uri((New-Object Uri $t.Url), $href))) ($t.Essai + 1) $false; continue } catch {} }
+            if ($href) { try { Start-FaviconTelechargement $hote ([string](New-Object Uri((New-Object Uri $t.Url), $href))) $t.Essai $false; continue } catch {} }
             Start-Favicon $hote ($t.Essai + 1); continue
         }
         $octets = $resultat
@@ -434,7 +454,7 @@ function Get-AppIcon($a) {
     if ($hote) {
         $f = Get-FaviconFichier $hote
         if ($f) { $img = Read-Favicon $f; if ($img) { $script:icons[$a.Id] = $img; return $img } }
-        elseif (-not $script:faviconEchecs[$hote] -and -not $script:faviconTaches.ContainsKey($hote)) { Start-Favicon $hote }
+        elseif (-not $script:faviconEchecs[$hote] -and -not $script:faviconTaches.ContainsKey($hote)) { $script:faviconUrl[$hote] = Get-SiteUrl $a; Start-Favicon $hote }
     }
     $path = $null
     if ($a.IconPath) { $path = $a.IconPath }   # Panneau de configuration / Parametres
