@@ -370,8 +370,14 @@ function Get-SiteUrl($a) {
     try { [uri]$u } catch { $null }
 }
 function Get-SiteHote($a) { $u = Get-SiteUrl $a; if ($u) { $u.Host } }
+# Ton icone a toi d'abord (raccourcis\.icons\acck.io.png, ou sans "www." : youtube.com.png), puis celle telechargee
 function Get-FaviconFichier([string]$hote) {
-    foreach ($ext in 'png', 'ico') { $f = Join-Path $faviconsDir "$hote.$ext"; if (Test-Path -LiteralPath $f) { return $f } }
+    $perso = Join-Path $raccourcisDir '.icons'
+    foreach ($dir in $perso, $faviconsDir) {
+        foreach ($nom in $hote, ($hote -replace '^www\.', '')) {
+            foreach ($ext in 'png', 'ico') { $f = Join-Path $dir "$nom.$ext"; if (Test-Path -LiteralPath $f) { return $f } }
+        }
+    }
     $null
 }
 function Read-Favicon([string]$f) {
