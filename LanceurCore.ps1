@@ -340,12 +340,17 @@ function Resolve-Cible([string]$cible, $list = $script:baseApps, $parNom = $scri
 
 # Nom lisible d'un site vise par une cible (URL, ou navigateur suivi d'une URL) : www.youtube.com -> YouTube,
 # gemini.google.com -> Gemini, www.allkeyshop.com -> Allkeyshop. $null si la cible n'est pas un site.
-$nomsConnus = @{ 'youtube' = 'YouTube'; 'github' = 'GitHub'; 'chatgpt' = 'ChatGPT'; 'linkedin' = 'LinkedIn'; 'deepseek' = 'DeepSeek'; 'allkeyshop' = 'AllKeyShop' }
+$nomsConnus = @{ 'youtube' = 'YouTube'; 'github' = 'GitHub'; 'chatgpt' = 'ChatGPT'; 'linkedin' = 'LinkedIn'; 'deepseek' = 'DeepSeek'; 'allkeyshop' = 'AllKeyShop'
+                 'acck' = 'AcckCloud'; 'proxy-cheap' = 'Proxy-Cheap' }
+# Sous-domaines sans interet pour le nom : app.proxy-cheap.com -> Proxy-Cheap, pas "App"
+$sousDomainesGeneriques = 'www', 'm', 'app', 'apps', 'my', 'web', 'portal', 'dashboard', 'account', 'accounts', 'login', 'auth', 'secure', 'client', 'clients'
 function Get-NomSite([string]$cible) {
     $prog, $arg = Split-Commande $cible
     $u = if ($prog -match '^https?://') { $prog } elseif ($arg -match '^(https?://\S+)') { $Matches[1] } else { return $null }
     try { $h = ([uri]$u).Host -replace '^www\d*\.', '' } catch { return $null }
-    $mot = ($h -split '\.')[0]; if (-not $mot) { return $null }
+    $parts = @($h -split '\.' | Where-Object { $_ })
+    $i = 0; while ($i -lt $parts.Count - 2 -and $parts[$i] -in $sousDomainesGeneriques) { $i++ }
+    $mot = $parts[$i]; if (-not $mot) { return $null }
     if ($nomsConnus[$mot]) { return $nomsConnus[$mot] }
     $mot.Substring(0, 1).ToUpper() + $mot.Substring(1)
 }
