@@ -5,10 +5,11 @@ $dataDir   = Join-Path $env:APPDATA 'Lanceur'
 $histFile  = Join-Path $dataDir 'historique.json'
 $aliasFile = Join-Path $PSScriptRoot 'alias.txt'
 $raccourcisDir = Join-Path $PSScriptRoot 'raccourcis'   # tout fichier pose ici (.lnk, .url, .exe, document...) apparait dans la recherche
-New-Item -ItemType Directory -Force $dataDir, $raccourcisDir | Out-Null
+New-Item -ItemType Directory -Force $dataDir, $raccourcisDir, (Join-Path $raccourcisDir ".icons") | Out-Null
 
 # Fichiers du dossier raccourcis (sous-dossiers compris), sauf les fichiers caches type .gitkeep
-function Get-Raccourcis { @(Get-ChildItem -LiteralPath $raccourcisDir -File -Recurse -ErrorAction SilentlyContinue | Where-Object { -not $_.Name.StartsWith('.') }) }
+# (fichiers et dossiers commencant par un point exclus : ".icons" garde les icones utilisees par tes raccourcis)
+function Get-Raccourcis { @(Get-ChildItem -LiteralPath $raccourcisDir -File -Recurse -ErrorAction SilentlyContinue | Where-Object { $_.FullName.Substring($raccourcisDir.Length) -notmatch '\\\.' }) }
 # Change quand un raccourci est ajoute, supprime, renomme ou modifie
 function Get-RaccourcisStamp { (Get-Raccourcis | ForEach-Object { "$($_.FullName)|$($_.LastWriteTimeUtc.Ticks)" }) -join ';' }
 
@@ -69,8 +70,14 @@ public static class LanceurSearch {
     }
     // aliases[i] = alias separes par '|'
     // bonus[i] = decalage de classement selon le type (applis 0, taches du Panneau de configuration negatif...)
-    public static int[] Find(string[] keys, string[] aliases, int[] hits, int[] bonus, string text, int max) {
-        string q = Key((text ?? "").Trim());
+    // groups[i] = "" pour un resultat normal, ou un prefixe ("steam", "gog") : ces entrees ne sont cherchees qu'apres lui
+    // ("steam dark" cherche "dark" dans les jeux Steam, "steam " les liste tous) ; ailleurs elles ne repondent qu'a leurs alias
+    public static int[] Find(string[] keys, string[] aliases, int[] hits, int[] bonus, string[] groups, string text, int max) {
+        string grp = "";
+        string q = Key((text ?? "").TrimStart());
+        foreach (var g in groups)
+            if (g.Length > 0 && q.StartsWith(g + " ", StringComparison.Ordinal)) { grp = g; q = q.Substring(g.Length + 1); break; }
+        q = q.Trim();
         // Trois niveaux, chacun utilise seulement si le precedent est vide :
         //   1. applis, raccourcis, Panneau de configuration, pages Parametres qui commencent comme le texte
         //   2. taches du Panneau de configuration qui commencent comme le texte (longues et nombreuses)
@@ -79,7 +86,8 @@ public static class LanceurSearch {
         var tasks = new List<int[]>();
         var weak = new List<int[]>();
         for (int i = 0; i < keys.Length; i++) {
-            int s = q.Length == 0 ? 1 : Score(keys[i], q);
+            if (groups[i] != grp && (grp.Length > 0 || q.Length == 0)) continue;
+            int s = groups[i] != grp ? 0 : q.Length == 0 ? 1 : Score(keys[i], q);
             if (q.Length > 0 && aliases[i].Length > 0)
                 foreach (var a in aliases[i].Split('|')) {
                     if (a == q) s = Math.Max(s, 2000);
@@ -94,8 +102,9 @@ public static class LanceurSearch {
         }
         if (res.Count == 0) res = tasks.Count > 0 ? tasks : weak;
         // meilleur score d'abord, puis le nom le plus court (Excel avant Exceed Share)
+        // (une liste complete, "steam ", est alphabetique)
         res.Sort((x, y) => y[1] != x[1] ? y[1].CompareTo(x[1])
-                         : keys[x[0]].Length != keys[y[0]].Length ? keys[x[0]].Length.CompareTo(keys[y[0]].Length)
+                         : q.Length > 0 && keys[x[0]].Length != keys[y[0]].Length ? keys[x[0]].Length.CompareTo(keys[y[0]].Length)
                          : string.CompareOrdinal(keys[x[0]], keys[y[0]]));
         var o = new int[Math.Min(max, res.Count)];
         for (int i = 0; i < o.Length; i++) o[i] = res[i][0];
@@ -109,7 +118,9 @@ function ConvertTo-Key([string]$s) { [LanceurSearch]::Key($s) }
 
 # Types de resultats (petite etiquette grise a cote de ce qui n'est pas une appli) et decalage de classement :
 # a qualite egale, les applis d'abord, les taches du Panneau de configuration (longues, nombreuses) en dernier.
-$typeBonus = @{ 'Appli' = 0; 'Raccourci' = 0; 'Commande' = 0; 'Panneau de config.' = -50; 'Parametres' = -50; 'Tache' = -250 }
+$typeBonus = @{ 'Appli' = 0; 'Raccourci' = 0; 'Commande' = 0; 'Action' = -50; 'Panneau de config.' = -50; 'Parametres' = -50; 'Tache' = -250 }
+# Jeux : type -> prefixe de recherche (ils ne sortent qu'apres "steam " / "gog ", ou par un alias)
+$groupesJeux = @{ 'Steam' = 'steam'; 'GOG' = 'gog' }
 $iconePanneau    = '::{26EE0668-A00A-44D7-9371-BEB064C98683}'
 $iconeParametres = 'shell:AppsFolder\windows.immersivecontrolpanel_cw5n1h2txyewy!microsoft.windows.immersivecontrolpanel'
 
@@ -142,8 +153,107 @@ function New-Entree($name, $id, $type, $target = $null, $iconPath = $null, $shel
     [pscustomobject]@{ Name = $name; Id = $id; Type = $type; Target = $target; IconPath = $iconPath; Shell = $shell; Key = (ConvertTo-Key $name); Aliases = @(); Idx = 0 }
 }
 
+# ---- Actions integrees ----
+# Id -> noms qui les trouvent (francais et anglais), icone ("fichier.dll,index" ou element shell), ce qu'elle fait.
+# Celles qui ferment tes applis ou suppriment des fichiers demandent d'abord (Oui par defaut : Entree confirme).
+$sys = Join-Path $env:WINDIR 'System32'
+$actions = [ordered]@{
+    'action:corbeille'   = @{ Noms = @('Vider la corbeille', 'Empty Recycle Bin'); Icone = '::{645FF040-5081-101B-9F08-00AA002F954E}'; Faire = { Invoke-ViderCorbeille } }
+    'action:arreter'     = @{ Noms = @('Arrêter le PC', 'Éteindre', 'Shut down'); Icone = "$sys\shell32.dll,27"
+        Faire = { if (Confirm-Action 'Arrêter' "Arrêter le PC maintenant ?") { shutdown.exe /s /t 0 } } }
+    'action:redemarrer'  = @{ Noms = @('Redémarrer', 'Restart', 'Reboot'); Icone = "$sys\imageres.dll,228"
+        Faire = { if (Confirm-Action 'Redémarrer' "Redémarrer le PC maintenant ?") { shutdown.exe /r /t 0 } } }
+    'action:deconnecter' = @{ Noms = @('Se déconnecter', 'Sign out', 'Log off'); Icone = "$sys\shell32.dll,176"
+        Faire = { if (Confirm-Action 'Se déconnecter' "Fermer ta session Windows maintenant ?") { shutdown.exe /l } } }
+    'action:veille'      = @{ Noms = @('Mettre en veille', 'Veille', 'Sleep'); Icone = "$sys\imageres.dll,96"
+        Faire = { [void][Windows.Forms.Application]::SetSuspendState('Suspend', $false, $false) } }
+    'action:verrouiller' = @{ Noms = @('Verrouiller', 'Lock'); Icone = "$sys\imageres.dll,54"
+        Faire = { Start-Process rundll32.exe -ArgumentList 'user32.dll,LockWorkStation' } }
+}
+function Get-ActionEntrees { foreach ($id in $actions.Keys) { foreach ($n in $actions[$id].Noms) { New-Entree $n $id 'Action' $null $actions[$id].Icone } } }
+# Question Oui / Non, Oui par defaut (Entree confirme)
+function Confirm-Action([string]$titre, [string]$question) { [Windows.Forms.MessageBox]::Show($question, $titre, 'YesNo', 'Warning', 'Button1') -eq 'Yes' }
+# Demande toujours (la confirmation de Windows peut etre desactivee), puis vide la corbeille
+function Invoke-ViderCorbeille {
+    $n = (New-Object -ComObject Shell.Application).Namespace(10).Items().Count
+    if (-not $n) { [void][Windows.Forms.MessageBox]::Show('La corbeille est déjà vide.', 'Corbeille', 'OK', 'Information'); return }
+    if (-not (Confirm-Action 'Vider la corbeille' "Supprimer définitivement $n élément$(if ($n -gt 1) { 's' }) de la corbeille ?")) { return }
+    Clear-RecycleBin -Force -ErrorAction SilentlyContinue
+}
+
+# ---- Jeux Steam et GOG ----
+function Get-SteamDossier { $p = (Get-ItemProperty 'HKCU:\Software\Valve\Steam' -ErrorAction SilentlyContinue).SteamPath; if ($p) { $p -replace '/', '\' } }
+# Dossier steamapps de chaque bibliotheque Steam (autres disques compris)
+function Get-SteamBibliotheques {
+    $steam = Get-SteamDossier; if (-not $steam) { return }
+    $libs = @($steam)
+    $vdf = Join-Path $steam 'steamapps\libraryfolders.vdf'
+    if (Test-Path -LiteralPath $vdf) { $libs += [regex]::Matches((Get-Content -LiteralPath $vdf -Raw -Encoding UTF8), '"path"\s+"([^"]+)"') | ForEach-Object { $_.Groups[1].Value -replace '\\\\', '\' } }
+    # [IO.Path]::Combine : une bibliotheque sur un disque absent (cle USB, ancien disque) est simplement ignoree
+    $libs | ForEach-Object { [IO.Path]::Combine($_, 'steamapps') } | Where-Object { Test-Path -LiteralPath $_ -ErrorAction SilentlyContinue } | Sort-Object -Unique
+}
+# Jeux Steam installes (pas les runtimes de Steam) : appid -> nom
+function Get-SteamJeux {
+    $res = [ordered]@{}
+    foreach ($dir in Get-SteamBibliotheques) {
+        foreach ($f in Get-ChildItem -LiteralPath $dir -Filter 'appmanifest_*.acf' -ErrorAction SilentlyContinue) {
+            $t = Get-Content -LiteralPath $f.FullName -Raw -Encoding UTF8
+            $id = [regex]::Match($t, '"appid"\s+"(\d+)"').Groups[1].Value; $nom = [regex]::Match($t, '"name"\s+"([^"]+)"').Groups[1].Value
+            $etat = [int][regex]::Match($t, '"StateFlags"\s+"(\d+)"').Groups[1].Value
+            if ($id -and $nom -and ($etat -band 4) -and $nom -notmatch '^(Steamworks|Proton|Steam Linux Runtime)' -and -not $res.Contains($id)) { $res[$id] = $nom }
+        }
+    }
+    $res
+}
+# Steam garde la petite icone de chaque jeu en jpg 32x32 (sinon : l'icone de Steam)
+function Get-SteamIcone([string]$steam, [string]$id) {
+    $i = Get-ChildItem -LiteralPath (Join-Path $steam "appcache\librarycache\$id") -ErrorAction SilentlyContinue | Where-Object { $_.Name -match '^[0-9a-f]{40}\.jpg$' } | Select-Object -First 1
+    if ($i) { $i.FullName } else { Join-Path $steam 'steam.exe' }
+}
+# Jeux GOG installes : inscrits dans le registre par leur installeur (seulement si le jeu est bien la). Lu via .NET : ~1 ms.
+function Get-GogJeux {
+    foreach ($root in 'SOFTWARE\WOW6432Node\GOG.com\Games', 'SOFTWARE\GOG.com\Games') {
+        $k = [Microsoft.Win32.Registry]::LocalMachine.OpenSubKey($root); if (-not $k) { continue }
+        foreach ($n in $k.GetSubKeyNames()) {
+            $g = $k.OpenSubKey($n); if (-not $g) { continue }
+            $nom = $g.GetValue('gameName'); $exe = $g.GetValue('exe'); $id = $g.GetValue('gameID'); $g.Close()
+            if ($nom -and $exe -and [IO.File]::Exists($exe)) { [pscustomobject]@{ Nom = $nom; Id = $(if ($id) { $id } else { $n }); Exe = $exe } }
+        }
+        $k.Close()
+    }
+}
+function Get-JeuxEntrees {
+    $steam = Get-SteamDossier; $jeux = Get-SteamJeux
+    foreach ($id in $jeux.Keys) { New-Entree $jeux[$id] "steam:$id" 'Steam' "steam://rungameid/$id" (Get-SteamIcone $steam $id) }
+    foreach ($g in @(Get-GogJeux)) { New-Entree $g.Nom "gog:$($g.Id)" 'GOG' $g.Exe }
+}
+# Change quand un jeu est installe ou desinstalle (rapide : dates des dossiers steamapps + liste GOG)
+function Get-JeuxStamp {
+    $steam = @(foreach ($d in @(Get-SteamBibliotheques)) { [string](Get-Item -LiteralPath $d).LastWriteTimeUtc.Ticks })
+    $gog = @(foreach ($g in @(Get-GogJeux)) { [string]$g.Id })
+    ($steam + $gog) -join ','
+}
+
 function Import-Apps {
+    # Raccourcis perso : nom = nom du fichier sans extension ("Compta.lnk" -> "Compta")
+    # Dans un sous-dossier ("raccourcis\Brave\Banque.url") : etiquette = nom du sous-dossier, qui fait partie de la recherche
+    $racc = @(foreach ($f in Get-Raccourcis) {
+        $rel = $f.FullName.Substring($raccourcisDir.Length).TrimStart('\')
+        $dossier = if ($rel.Contains('\')) { $rel.Split('\')[0] } else { $null }
+        $e = New-Entree $f.BaseName $f.FullName $(if ($dossier) { $dossier } else { 'Raccourci' }) $f.FullName
+        if ($dossier) { $e.Key = ConvertTo-Key "$($f.BaseName) $dossier" }
+        $e
+    })
+    # Un raccourci qui porte le nom d'une appli la remplace (ex. "Google Calendar.lnk" qui ouvre directement Tasks) :
+    # il s'affiche comme l'appli et en reprend le nombre de lancements
+    $propres = @{}; foreach ($r in $racc) { $propres[(ConvertTo-Key $r.Name)] = $r }
     $list = @(Get-StartApps | Where-Object { $_.Name -and $_.AppID } | Sort-Object Name -Unique | ForEach-Object {
+        $mien = $propres[(ConvertTo-Key $_.Name)]
+        if ($mien) {
+            $mien.Type = 'Appli'; $mien.Key = ConvertTo-Key $mien.Name
+            if (-not $script:hist[$mien.Id] -and $script:hist[$_.AppID]) { $script:hist[$mien.Id] = $script:hist[$_.AppID] }
+            return
+        }
         # Applis web installees depuis un navigateur ("Brave._crx_...", "Chrome._crx_...") : etiquette = le navigateur,
         # et le nom du navigateur fait partie de la recherche ("brave" les liste toutes)
         if ($_.AppID -match '^(Brave|Chrome|Chromium|MSEdge|Edge|Vivaldi|Opera)[^.]*\._crx_') {
@@ -153,16 +263,10 @@ function Import-Apps {
             $e
         } else { New-Entree $_.Name $_.AppID 'Appli' }
     })
-    $pris = @{}; foreach ($a in $list) { $pris[$a.Key] = $true }
-    # Raccourcis perso : nom = nom du fichier sans extension ("Compta.lnk" -> "Compta")
-    # Dans un sous-dossier ("raccourcis\Brave\Banque.url") : etiquette = nom du sous-dossier, qui fait partie de la recherche
-    foreach ($f in Get-Raccourcis) {
-        $rel = $f.FullName.Substring($raccourcisDir.Length).TrimStart('\')
-        $dossier = if ($rel.Contains('\')) { $rel.Split('\')[0] } else { $null }
-        $e = New-Entree $f.BaseName $f.FullName $(if ($dossier) { $dossier } else { 'Raccourci' }) $f.FullName
-        if ($dossier) { $e.Key = ConvertTo-Key "$($f.BaseName) $dossier" }
-        $list += $e
-    }
+    $list += $racc
+    $pris = @{}; foreach ($a in $list) { $pris[(ConvertTo-Key $a.Name)] = $true }
+    # Actions integrees (Arreter, Redemarrer, Veille, Vider la corbeille...)
+    $list += @(Get-ActionEntrees)
     # Elements (Options d'indexation, Options d'alimentation...) et taches ("Change how your mouse works"...)
     # du Panneau de configuration, comme la recherche Windows. Ouverts via leur element shell (thread STA requis : c'est le cas).
     try {
@@ -190,6 +294,9 @@ function Import-Apps {
         if ($fr) { $e.Key = ConvertTo-Key "$nom $fr" }   # "son" trouve aussi "Sound"
         $list += $e
     }
+    # Jeux Steam et GOG installes (cherches seulement apres "steam " / "gog ")
+    try { $list += @(Get-JeuxEntrees); $script:jeuxStamp = Get-JeuxStamp }
+    catch { Write-JournalSiDispo "Jeux non charges : $($_.Exception.Message)" }
     $script:baseApps = $list   # liste sans les alias : Update-Aliases la reprend en quelques ms
     $script:appsLoadedAt = Get-Date
     $script:raccourcisStamp = Get-RaccourcisStamp
@@ -226,7 +333,8 @@ function Resolve-Cible([string]$cible, $list = $script:baseApps, $parNom = $scri
     if ($parNom -and $parNom.ContainsKey($cible)) { return $parNom[$cible] }
     if ($cible -match '[\\/:.]') { return $null }
     $best = $null
-    foreach ($a in $list) { if (-not $a.Target -and $a.Name -like "$cible*" -and (-not $best -or $a.Name.Length -lt $best.Name.Length)) { $best = $a } }
+    $kc = ConvertTo-Key $cible   # debut de nom : applis, raccourcis, pages Parametres, jeux, actions (pas les commandes)
+    foreach ($a in $list) { if ($a.Type -ne 'Commande' -and $a.Key.StartsWith($kc, [StringComparison]::Ordinal) -and (-not $best -or $a.Name.Length -lt $best.Name.Length)) { $best = $a } }
     $best
 }
 
@@ -246,12 +354,12 @@ function Update-Aliases {
     }
     # Tableaux pour la recherche C# (boucles simples : ~10x plus rapide que des pipelines sur 600 entrees)
     $n = $list.Count
-    $keys = New-Object string[] $n; $al = New-Object string[] $n; $hits = New-Object int[] $n; $bonus = New-Object int[] $n
+    $keys = New-Object string[] $n; $al = New-Object string[] $n; $hits = New-Object int[] $n; $bonus = New-Object int[] $n; $grp = New-Object string[] $n
     for ($i = 0; $i -lt $n; $i++) {
         $a = $list[$i]; $a.Idx = $i
-        $keys[$i] = $a.Key; $al[$i] = $a.Aliases -join '|'; $hits[$i] = [int]$script:hist[$a.Id]; $bonus[$i] = [int]$typeBonus[$a.Type]
+        $keys[$i] = $a.Key; $al[$i] = $a.Aliases -join '|'; $hits[$i] = [int]$script:hist[$a.Id]; $bonus[$i] = [int]$typeBonus[$a.Type]; $grp[$i] = [string]$groupesJeux[$a.Type]
     }
-    $script:apps = $list; $script:keys = $keys; $script:aliasArr = $al; $script:hits = $hits; $script:bonus = $bonus
+    $script:apps = $list; $script:keys = $keys; $script:aliasArr = $al; $script:hits = $hits; $script:bonus = $bonus; $script:groups = $grp
     $script:aliasStamp = (Get-Item $aliasFile).LastWriteTime
 }
 
@@ -265,13 +373,13 @@ function Get-MenuDemarrerStamp {
 # Recharge seulement si alias.txt, le dossier raccourcis ou le menu Demarrer a change
 # (la liste complete, applis du Store comprises, est aussi rafraichie toutes les 30 min par la barre)
 function Update-AppsIfStale {
-    if ((Get-RaccourcisStamp) -ne $script:raccourcisStamp -or (Get-MenuDemarrerStamp) -ne $script:menuStamp) { Import-Apps }
+    if ((Get-RaccourcisStamp) -ne $script:raccourcisStamp -or (Get-MenuDemarrerStamp) -ne $script:menuStamp -or (Get-JeuxStamp) -ne $script:jeuxStamp) { Import-Apps }
     elseif ((Get-Item $aliasFile).LastWriteTime -ne $script:aliasStamp) { Update-Aliases }   # alias seuls : instantane
 }
 
 # Toujours entourer le resultat de @(...) : avec un seul resultat, PowerShell 5.1 renvoie l'objet seul
 function Find-Apps([string]$text, [int]$max = 15) {
-    $idx = [LanceurSearch]::Find($script:keys, $script:aliasArr, $script:hits, $script:bonus, $text, $max)
+    $idx = [LanceurSearch]::Find($script:keys, $script:aliasArr, $script:hits, $script:bonus, $script:groups, $text, $max)
     @(foreach ($i in $idx) { $script:apps[$i] })
 }
 
@@ -287,7 +395,8 @@ function Invoke-Launch($app, [string]$text) {
         if ($text -eq ':alias') { Show-AliasManager; return $true }
         if ($app) {
             Write-JournalSiDispo "Lancement : $($app.Name) [$($app.Type) $($app.Id)]"
-            if ($app.Shell) { $app.Shell.InvokeVerb() }                                              # Panneau de configuration
+            if ($app.Type -eq 'Action') { & $actions[$app.Id].Faire }                              # action integree
+            elseif ($app.Shell) { $app.Shell.InvokeVerb() }                                              # Panneau de configuration
             elseif ($app.Type -eq 'Parametres') { [void][Diagnostics.Process]::Start($app.Target) }   # page ms-settings:
             elseif ($app.Target) { Start-Process $app.Target }
             else { Start-Process explorer.exe "shell:AppsFolder\$($app.Id)" }

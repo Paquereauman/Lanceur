@@ -227,6 +227,67 @@ public static class LanceurIcon {
         } catch { return null; }
         finally { if (hb != IntPtr.Zero) DeleteObject(hb); }
     }
+    // Icone numero index d'un fichier .dll / .exe (actions integrees : "shell32.dll,27")
+    [DllImport("shell32.dll", CharSet = CharSet.Unicode)]
+    static extern int SHDefExtractIcon(string path, int index, uint flags, out IntPtr large, out IntPtr small, uint size);
+    [DllImport("user32.dll")] static extern bool DestroyIcon(IntPtr h);
+    public static Bitmap FromResource(string path, int index, int size) {
+        IntPtr large, small;
+        if (SHDefExtractIcon(path, index, 0, out large, out small, (uint)size) != 0 || large == IntPtr.Zero) return null;
+        try { using (var ico = Icon.FromHandle(large)) return ico.ToBitmap(); }
+        finally { DestroyIcon(large); }
+    }
+    // Une image utilisee comme icone (Steam garde celles des jeux en petits jpg) : reduite a la bonne taille
+    public static Bitmap FromPicture(string path, int size) {
+        try {
+            using (var src = new Bitmap(new System.IO.MemoryStream(System.IO.File.ReadAllBytes(path)))) {
+                var img = new Bitmap(size, size);
+                using (var g = Graphics.FromImage(img)) { g.InterpolationMode = System.Drawing.Drawing2D.InterpolationMode.HighQualityBicubic; g.DrawImage(src, 0, 0, size, size); }
+                return img;
+            }
+        } catch { return null; }
+    }
+}
+// Menus clic droit sombres (memes couleurs que la barre)
+public class LanceurMenuCouleurs : ProfessionalColorTable {
+    static readonly Color Bg = Color.FromArgb(43, 43, 43), Hover = Color.FromArgb(62, 62, 62), Line = Color.FromArgb(70, 70, 70);
+    public override Color ToolStripDropDownBackground { get { return Bg; } }
+    public override Color ImageMarginGradientBegin { get { return Bg; } }
+    public override Color ImageMarginGradientMiddle { get { return Bg; } }
+    public override Color ImageMarginGradientEnd { get { return Bg; } }
+    public override Color MenuBorder { get { return Line; } }
+    public override Color MenuItemBorder { get { return Hover; } }
+    public override Color MenuItemSelected { get { return Hover; } }
+    public override Color MenuItemSelectedGradientBegin { get { return Hover; } }
+    public override Color MenuItemSelectedGradientEnd { get { return Hover; } }
+    public override Color MenuItemPressedGradientBegin { get { return Hover; } }
+    public override Color MenuItemPressedGradientEnd { get { return Hover; } }
+    public override Color CheckBackground { get { return Bg; } }
+    public override Color CheckSelectedBackground { get { return Hover; } }
+    public override Color CheckPressedBackground { get { return Hover; } }
+    public override Color SeparatorDark { get { return Line; } }
+    public override Color SeparatorLight { get { return Bg; } }
+}
+public class LanceurMenuSombre : ToolStripProfessionalRenderer {
+    static readonly Color Text = Color.FromArgb(235, 235, 235), Hover = Color.FromArgb(62, 62, 62);
+    public LanceurMenuSombre() : base(new LanceurMenuCouleurs()) { RoundedEdges = false; }
+    protected override void OnRenderMenuItemBackground(ToolStripItemRenderEventArgs e) {
+        if (!e.Item.Selected || !e.Item.Enabled) return;
+        using (var b = new SolidBrush(Hover)) e.Graphics.FillRectangle(b, 3, 0, e.Item.Width - 6, e.Item.Height);
+    }
+    protected override void OnRenderItemText(ToolStripItemTextRenderEventArgs e) {
+        var r = new Rectangle(e.TextRectangle.X, 0, e.TextRectangle.Width, e.Item.Height);
+        TextRenderer.DrawText(e.Graphics, e.Text, e.TextFont, r, e.Item.Enabled ? Text : Color.Gray,
+            TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.SingleLine | TextFormatFlags.NoPrefix);
+    }
+    protected override void OnRenderItemCheck(ToolStripItemImageRenderEventArgs e) {
+        var r = e.ImageRectangle; var g = e.Graphics;
+        g.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
+        using (var p = new Pen(Text, Math.Max(1.5f, r.Height / 9f)))
+            g.DrawLines(p, new[] { new PointF(r.Left + r.Width * 0.22f, r.Top + r.Height * 0.52f),
+                                   new PointF(r.Left + r.Width * 0.42f, r.Top + r.Height * 0.72f),
+                                   new PointF(r.Left + r.Width * 0.78f, r.Top + r.Height * 0.30f) });
+    }
 }
 '@
 [void][LanceurNative]::SetProcessDPIAware()
@@ -296,7 +357,13 @@ function Get-AppIcon($a) {
     } else { $path = "shell:AppsFolder\$($a.Id)" }
     # Meme fichier d'icone pour beaucoup d'entrees (taches, pages Parametres) : extrait une seule fois
     if ($path -and $script:iconParChemin.ContainsKey($path)) { $img = $script:iconParChemin[$path] }
-    else { $img = if ($path) { [LanceurIcon]::Get($path, $iconPx) } else { $null }; if ($path) { $script:iconParChemin[$path] = $img } }
+    else {
+        $img = if (-not $path) { $null }
+               elseif ($path -match '\.(jpg|png)$') { [LanceurIcon]::FromPicture($path, $iconPx) }                          # jeux Steam
+               elseif ($path -match '^(.+\.(dll|exe)),(-?\d+)$') { [LanceurIcon]::FromResource($Matches[1], [int]$Matches[3], $iconPx) }   # actions
+               else { [LanceurIcon]::Get($path, $iconPx) }
+        if ($path) { $script:iconParChemin[$path] = $img }
+    }
     $script:icons[$a.Id] = $img
     $img
 }
@@ -435,6 +502,7 @@ $list.DrawMode = 'OwnerDrawFixed'
 $list.ItemHeight = [int](34 * $scale)
 $policeEtiquette = New-Object Drawing.Font('Segoe UI', 8)
 $pop.Controls.Add($list)
+$list.Add_HandleCreated({ [LanceurCue]::Sombre($list.Handle) })   # barre de defilement sombre (listes de jeux)
 
 # Dessin d'une ligne : icone + nom (+ type a droite)
 $list.Add_DrawItem({
@@ -485,7 +553,8 @@ function Show-Results {
         $script:results = @(Find-Apps $Matches[2] 10)
     } else {
         $script:aliasMode = $null
-        $script:results = @(Find-Apps $box.Text 10)
+        $max = if ($box.Text -match '^\s*(steam|gog)\s') { 100 } else { 10 }   # "steam " / "gog " : toute la liste des jeux, qui defile
+        $script:results = @(Find-Apps $box.Text $max)
     }
     $list.BeginUpdate(); $list.Items.Clear()
     foreach ($a in $script:results) {
@@ -496,7 +565,7 @@ function Show-Results {
     $list.EndUpdate()
     Update-BarIcon
     if (-not $list.Items.Count) { $pop.Hide(); return }
-    $ph = $list.Items.Count * $list.ItemHeight + [int](12 * $scale) + 4   # +4 : evite une barre de defilement inutile
+    $ph = [Math]::Min($list.Items.Count, 10) * $list.ItemHeight + [int](12 * $scale) + 4   # 10 lignes au plus, la suite defile ; +4 : pas de barre inutile
     $px = [Math]::Min($script:barX, [Windows.Forms.Screen]::PrimaryScreen.Bounds.Right - $popW - 4)
     # Barre des taches en haut : suggestions en dessous ; en bas : au-dessus
     $py = if ($script:tbEnHaut) { $script:tbBottom + [int](6 * $scale) } else { $script:tbTop - $ph - [int](6 * $scale) }
@@ -639,6 +708,8 @@ $miDroite = $menu.Items.Add('A droite', $null, { Set-Cote 'Droite' })
 $menu.Add_Opening({ $miGauche.Checked = $script:cote -eq 'Gauche'; $miDroite.Checked = $script:cote -eq 'Droite' })   # coche le cote actuel
 [void]$menu.Items.Add('-')
 [void]$menu.Items.Add('Quitter la barre', $null, { Write-Journal 'Quitter (menu)'; Set-Content $stopFlag '' -ErrorAction SilentlyContinue; $bar.Close() })
+$menuSombre = New-Object LanceurMenuSombre
+foreach ($m in @($menu, $itemMenu)) { $m.Renderer = $menuSombre; $m.Font = New-Object Drawing.Font('Segoe UI', 10) }
 $bar.ContextMenuStrip = $menu
 $box.ContextMenuStrip = $menu
 $pic.ContextMenuStrip = $menu

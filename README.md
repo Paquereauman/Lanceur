@@ -31,6 +31,16 @@ PowerShell 5.1 that ships with Windows. The interface is in French.
   `travail` lists everything in that folder.
 - **Web apps sorted by browser**: sites installed as apps from Brave, Chrome, Edge… are tagged with their
   browser, and typing `brave` lists your Brave apps.
+- **Built-in actions**: *Arrêter le PC* (or *Éteindre*, *Shut down*), *Redémarrer*, *Se déconnecter*, *Veille*,
+  *Verrouiller* and *Vider la corbeille*. The ones that close your apps or delete files ask first, with **Yes** as the
+  default: `arr`, Enter, Enter.
+- **Games, on demand**: installed Steam and GOG games stay out of the normal results. Type `steam ` first:
+  `steam age` suggests Age of Empires, and `steam ` alone lists every installed game (the list scrolls). Same with `gog `.
+  Give a game an alias to launch it directly. Installed or uninstalled games show up the next time you click the bar.
+- A shortcut in `raccourcis` named like an installed app **replaces** it in the search (e.g. a `Google Calendar.lnk`
+  that opens Calendar straight on Tasks). Keep the icons your shortcuts use in `raccourcis\.icons` (ignored by the search).
+- An alias with a partial name (`wi = Wi-F`) also finds shortcuts, Settings pages, games and actions.
+- Dark right-click menus.
 - Paths, URLs and commands work too.
 - **Windows key**: tap it alone to open the bar instead of the Start menu (Win+E and other shortcuts still
   work, Ctrl+Esc opens Start). Global hotkey **Ctrl+Alt+Space** too.
