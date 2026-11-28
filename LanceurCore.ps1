@@ -313,248 +313,299 @@ function Add-Alias([string]$alias, [string]$cible) {
     Save-AliasPairs $pairs
 }
 
-# ---- Fenetre des alias (style Windows 11) ----
-# Une colonne : ajout en haut (Entree, Entree, alias suivant), puis la liste filtrable.
-# Tout est enregistre a chaque changement, et la barre en tient compte aussitot.
-# $preset : nom d'une appli a pre-remplir comme cible (clic droit sur une suggestion de la barre)
-function Show-AliasManager([string]$preset) {
-    $g = [Drawing.Graphics]::FromHwnd([IntPtr]::Zero); $k = $g.DpiX / 96; $g.Dispose()
-    function px([double]$v) { [int]($v * $k) }
-    $cBg = [Drawing.Color]::FromArgb(32, 32, 32); $cChamp = [Drawing.Color]::FromArgb(45, 45, 45); $cChampHaut = [Drawing.Color]::FromArgb(52, 52, 52)
-    $cTexte = [Drawing.Color]::FromArgb(240, 240, 240); $cDim = [Drawing.Color]::FromArgb(160, 160, 160)
-    $cAccent = [Drawing.Color]::FromArgb(76, 194, 255); $cAccentFonce = [Drawing.Color]::FromArgb(0, 95, 184)
-    $cSel = [Drawing.Color]::FromArgb(50, 50, 50); $cWarn = [Drawing.Color]::FromArgb(252, 185, 0)
-    $famille = if ((New-Object Drawing.Text.InstalledFontCollection).Families.Name -contains 'Segoe UI Variable Text') { 'Segoe UI Variable Text' } else { 'Segoe UI' }
-    $font = New-Object Drawing.Font($famille, 10); $fontFort = New-Object Drawing.Font($famille, 10, [Drawing.FontStyle]::Bold)
-    $fontTitre = New-Object Drawing.Font($famille, 18, [Drawing.FontStyle]::Bold); $fontPetit = New-Object Drawing.Font($famille, 9)
-    $st = @{ pairs = (Get-AliasPairs); edit = $null; vue = @(); survol = -1 }
-    $aIcone = [bool](Get-Command Get-AppIcon -ErrorAction SilentlyContinue)
-    Copy-Item $aliasFile "$aliasFile.bak" -Force -ErrorAction SilentlyContinue   # filet de securite
+# ---- Fenetre des alias (reprise du systeme de basedhound, en francais) ----
+# Ajouter en haut ; double-clic (ou F2) sur un alias ou une cible pour le modifier sur place ; la croix (ou Suppr) supprime.
+# Tout est enregistre aussitot. La barre reste utilisable pendant que la fenetre est ouverte : on essaie l'alias tout de suite.
+# Les gestionnaires d'evenements tournent pendant ShowDialog : ils voient les variables de Show-AliasManager ($f, $grid...).
 
-    $f = New-Object Windows.Forms.Form
-    $f.Text = 'Alias'; $f.StartPosition = 'CenterScreen'; $f.AutoScaleMode = 'None'
-    $f.Size = New-Object Drawing.Size((px 620), (px 680)); $f.MinimumSize = New-Object Drawing.Size((px 460), (px 420))
-    $f.TopMost = $true; $f.MinimizeBox = $false; $f.KeyPreview = $true
-    $f.BackColor = $cBg; $f.ForeColor = $cTexte; $f.Font = $font
-    $f.Padding = New-Object Windows.Forms.Padding((px 24), (px 16), (px 24), (px 16))
-    # Barre de titre sombre et coins arrondis (Windows 11)
-    $f.Add_HandleCreated({ [LanceurCue]::Style($f.Handle) })
+$aliasCouleurs = @{
+    Fond = [Drawing.Color]::FromArgb(32, 32, 32); Champ = [Drawing.Color]::FromArgb(45, 45, 45); ChampSurvol = [Drawing.Color]::FromArgb(58, 58, 58)
+    Accent = [Drawing.Color]::FromArgb(60, 90, 140); AccentSurvol = [Drawing.Color]::FromArgb(76, 110, 166)
+    Ligne = [Drawing.Color]::FromArgb(52, 52, 52); LigneSel = [Drawing.Color]::FromArgb(42, 46, 54)
+    Texte = [Drawing.Color]::FromArgb(232, 232, 232); Discret = [Drawing.Color]::FromArgb(150, 150, 150)
+    Alias = [Drawing.Color]::FromArgb(140, 180, 245); Suppr = [Drawing.Color]::FromArgb(232, 80, 90); Attention = [Drawing.Color]::FromArgb(230, 180, 90)
+}
+$aliasPolice = New-Object Drawing.Font('Segoe UI', 10)
+$aliasVide   = New-Object Drawing.Bitmap(1, 1)   # case d'icone vide
+$aliasCroix  = [string][char]0x2715
 
-    # Champ arrondi facon Windows 11 : fond gris, trait de couleur en bas quand il a le focus
-    function New-Champ($cue) {
-        $p = New-Object Windows.Forms.Panel; $p.Height = (px 36); $p.Dock = 'Fill'; $p.Margin = New-Object Windows.Forms.Padding(0, 0, (px 8), 0); $p.BackColor = $cBg
-        $t = New-Object Windows.Forms.TextBox; $t.BorderStyle = 'None'; $t.BackColor = $cChamp; $t.ForeColor = $cTexte; $t.Font = $font
-        $p.Controls.Add($t); $p.Tag = $t; $t.Tag = $cue
-        $p.Add_Resize({ param($s) $tb = $s.Tag; $tb.Left = (px 11); $tb.Width = $s.Width - (px 22); $tb.Top = [int](($s.Height - $tb.Height) / 2) - 1; $s.Invalidate() })
-        $p.Add_Paint({
-            param($s, $e)
-            $gr = $e.Graphics; $gr.SmoothingMode = 'AntiAlias'; $tb = $s.Tag
-            $r = New-Object Drawing.Rectangle(0, 0, ($s.Width - 1), ($s.Height - 1)); $d = (px 8)
-            $path = New-Object Drawing.Drawing2D.GraphicsPath
-            $path.AddArc($r.X, $r.Y, $d, $d, 180, 90); $path.AddArc($r.Right - $d, $r.Y, $d, $d, 270, 90)
-            $path.AddArc($r.Right - $d, $r.Bottom - $d, $d, $d, 0, 90); $path.AddArc($r.X, $r.Bottom - $d, $d, $d, 90, 90); $path.CloseFigure()
-            $gr.FillPath((New-Object Drawing.SolidBrush($tb.BackColor)), $path)
-            $gr.DrawPath((New-Object Drawing.Pen([Drawing.Color]::FromArgb(60, 60, 60))), $path)
-            if ($tb.Focused) { $gr.FillRectangle((New-Object Drawing.SolidBrush($cAccent)), (px 4), ($s.Height - (px 2)), ($s.Width - (px 8)), (px 2)) }
-        })
-        $t.Add_GotFocus({ param($s) $s.BackColor = $cBg; $s.Parent.Invalidate() })
-        $t.Add_LostFocus({ param($s) $s.BackColor = $cChamp; $s.Parent.Invalidate() })
-        $t.Add_HandleCreated({ param($s) [void][LanceurCue]::Set($s.Handle, $s.Tag) })
-        $p
-    }
-    # Bouton plat arrondi
-    function New-Bouton($texte, $plein) {
-        $b = New-Object Windows.Forms.Button; $b.Text = $texte; $b.FlatStyle = 'Flat'; $b.FlatAppearance.BorderSize = 0
-        $b.BackColor = $(if ($plein) { $cAccent } else { $cChamp }); $b.ForeColor = $(if ($plein) { [Drawing.Color]::Black } else { $cTexte })
-        $b.FlatAppearance.MouseOverBackColor = $(if ($plein) { [Drawing.Color]::FromArgb(100, 205, 255) } else { $cChampHaut })
-        $b.Font = $(if ($plein) { $fontFort } else { $font }); $b.Height = (px 36); $b.Width = (px 104); $b.Cursor = 'Hand'; $b.Margin = New-Object Windows.Forms.Padding(0)
-        $b.Add_Resize({ param($s) $d = (px 8); $p = New-Object Drawing.Drawing2D.GraphicsPath; $w = $s.Width; $h = $s.Height
-            $p.AddArc(0, 0, $d, $d, 180, 90); $p.AddArc($w - $d, 0, $d, $d, 270, 90); $p.AddArc($w - $d, $h - $d, $d, $d, 0, 90); $p.AddArc(0, $h - $d, $d, $d, 90, 90)
-            $s.Region = New-Object Drawing.Region($p) })
-        $b
-    }
-    function New-Texte($t, $fnt, $col) { $l = New-Object Windows.Forms.Label; $l.Text = $t; $l.Font = $fnt; $l.ForeColor = $col; $l.AutoSize = $true; $l.Margin = New-Object Windows.Forms.Padding(0); $l }
+function Get-AliasEchelle { $g = [Drawing.Graphics]::FromHwnd([IntPtr]::Zero); $k = $g.DpiX / 96; $g.Dispose(); $k }
+function apx([double]$v) { [int]($v * $script:aliasK) }
 
-    # ---- Mise en page (une colonne) ----
-    $col = New-Object Windows.Forms.TableLayoutPanel
-    $col.Dock = 'Fill'; $col.ColumnCount = 1; $col.RowCount = 7
-    foreach ($s in 'AutoSize', 'AutoSize', 'AutoSize', 'AutoSize', 'AutoSize', 'Percent', 'AutoSize') { [void]$col.RowStyles.Add((New-Object Windows.Forms.RowStyle($s, 100))) }
-
-    $titre = New-Texte 'Alias' $fontTitre $cTexte
-    $sousTitre = New-Texte 'Un mot court qui ouvre une appli, un dossier ou un site depuis la barre.' $fontPetit $cDim
-    $sousTitre.Margin = New-Object Windows.Forms.Padding((px 2), (px 2), 0, (px 18))
-
-    $ligne = New-Object Windows.Forms.TableLayoutPanel; $ligne.Dock = 'Fill'; $ligne.ColumnCount = 3; $ligne.RowCount = 1; $ligne.Height = (px 36)
-    $ligne.Margin = New-Object Windows.Forms.Padding(0, 0, 0, (px 6))
-    [void]$ligne.ColumnStyles.Add((New-Object Windows.Forms.ColumnStyle('Percent', 30)))
-    [void]$ligne.ColumnStyles.Add((New-Object Windows.Forms.ColumnStyle('Percent', 70)))
-    [void]$ligne.ColumnStyles.Add((New-Object Windows.Forms.ColumnStyle('Absolute', (px 104))))
-    [void]$ligne.RowStyles.Add((New-Object Windows.Forms.RowStyle('Absolute', (px 36))))
-    $chAlias = New-Champ 'Alias'; $chCible = New-Champ 'Appli, dossier ou URL'
-    $tbAlias = $chAlias.Tag; $tbCible = $chCible.Tag
-    $btnAjout = New-Bouton 'Ajouter' $true
-    $ligne.Controls.Add($chAlias, 0, 0); $ligne.Controls.Add($chCible, 1, 0); $ligne.Controls.Add($btnAjout, 2, 0)
-    $info = New-Texte '' $fontPetit $cDim; $info.Margin = New-Object Windows.Forms.Padding((px 2), (px 2), 0, (px 22))
-
-    $chFiltre = New-Champ 'Rechercher dans tes alias'; $chFiltre.Dock = 'Top'; $chFiltre.Margin = New-Object Windows.Forms.Padding(0, 0, 0, (px 10))
-    $filtre = $chFiltre.Tag
-
-    $liste = New-Object Windows.Forms.ListBox
-    $liste.Dock = 'Fill'; $liste.BorderStyle = 'None'; $liste.BackColor = $cBg; $liste.ForeColor = $cTexte; $liste.IntegralHeight = $false
-    $liste.DrawMode = 'OwnerDrawFixed'; $liste.ItemHeight = (px 44); $liste.SelectionMode = 'MultiExtended'
-    $bas = New-Texte 'Double-clic : modifier     Suppr : supprimer     Ctrl+F : rechercher     Échap : fermer' $fontPetit $cDim
-    $bas.Margin = New-Object Windows.Forms.Padding((px 2), (px 10), 0, 0)
-
-    $col.Controls.Add($titre, 0, 0); $col.Controls.Add($sousTitre, 0, 1); $col.Controls.Add($ligne, 0, 2); $col.Controls.Add($info, 0, 3)
-    $col.Controls.Add($chFiltre, 0, 4); $col.Controls.Add($liste, 0, 5); $col.Controls.Add($bas, 0, 6)
-    $f.Controls.Add($col)
-
-    # ---- Fonctions ----
-    function Get-Resolu($cible) { $a = Resolve-Cible $cible; if ($a -and $a.Type -ne 'Commande') { $a } else { $null } }   # $null : commande / chemin / introuvable
-    function Set-Info($t, $c = $cDim) { $info.Text = $t; $info.ForeColor = $c }
-    # Ce que fait une cible qui n'est pas une appli : dossier, fichier, site web, commande, ou introuvable
-    function Get-Genre([string]$c) {
-        $x = [Environment]::ExpandEnvironmentVariables($c)
-        if ($x -match '^(https?://|www\.)') { return 'site web' }
-        if (Test-Path -LiteralPath $x -PathType Container -ErrorAction SilentlyContinue) { return 'dossier' }
-        if (Test-Path -LiteralPath $x -ErrorAction SilentlyContinue) { return 'fichier' }
-        if ($x -match '^[a-z][a-z0-9+.-]*:' -and $x -notmatch '^[a-z]:\') { return 'lien' }
-        if (Get-Command ($x -split ' ')[0] -CommandType Application -ErrorAction SilentlyContinue) { return 'commande' }
-        'introuvable'
-    }
-    function Update-Liste {
-        $q = ConvertTo-Key $filtre.Text.Trim()
-        $vue = New-Object Collections.ArrayList
-        foreach ($p in ($st.pairs | Sort-Object { ConvertTo-Key $_.Alias })) {
-            $a = Get-Resolu $p.Cible
-            $nom = if ($a) { $a.Name } else { $p.Cible }
-            if ($q -and -not (ConvertTo-Key "$($p.Alias) $nom $($p.Cible)").Contains($q)) { continue }
-            [void]$vue.Add([pscustomobject]@{ Paire = $p; App = $a; Brut = (Resolve-Cible $p.Cible); Nom = $nom; Genre = $(if ($a) { '' } else { Get-Genre $p.Cible }) })
-        }
-        $st.vue = $vue
-        $liste.BeginUpdate(); $liste.Items.Clear(); foreach ($v in $vue) { [void]$liste.Items.Add($v.Paire.Alias) }; $liste.EndUpdate()
-        $sousTitre.Text = "$($st.pairs.Count) alias  ·  un mot court qui ouvre une appli, un dossier ou un site depuis la barre."
-    }
-    function Save-Tout($msg) {
-        Save-AliasPairs $st.pairs
-        $st.pairs = Get-AliasPairs
-        Update-Liste
-        Set-Info ([string][char]0x2713 + "  $msg") $cAccent
-    }
-    function Reset-Ajout { $st.edit = $null; $btnAjout.Text = 'Ajouter'; $tbAlias.Text = ''; $tbCible.Text = ''; $tbAlias.Focus() }
-    function Add-Une {
-        $a = $tbAlias.Text.Trim(); $c = $tbCible.Text.Trim()
-        if (-not $a) { $tbAlias.Focus(); return }
-        if ($a.Contains('=')) { Set-Info "Un alias ne peut pas contenir « = »." $cWarn; return }
-        if (-not $c) { $tbCible.Focus(); return }
-        $ka = ConvertTo-Key $a
-        $remplace = @($st.pairs | Where-Object { (ConvertTo-Key $_.Alias) -eq $ka -and $_ -ne $st.edit }).Count -gt 0
-        foreach ($x in @($st.pairs | Where-Object { (ConvertTo-Key $_.Alias) -eq $ka -or ($st.edit -and $_ -eq $st.edit) })) { $st.pairs.Remove($x) }
-        [void]$st.pairs.Add([pscustomobject]@{ Alias = $a; Cible = $c })
-        $r = Get-Resolu $c
-        $msg = "$a $([char]0x2192) $(if ($r) { $r.Name } else { "$c  ($(Get-Genre $c))" })"
-        if ($st.edit) { $msg += '  · modifié' } elseif ($remplace) { $msg += '  · remplace l''ancien' }
-        Save-Tout $msg
-        Reset-Ajout
-    }
-    function Edit-Selection {
-        $i = $liste.SelectedIndex; if ($i -lt 0) { return }
-        $p = $st.vue[$i].Paire
-        $st.edit = $p; $tbAlias.Text = $p.Alias; $tbCible.Text = $p.Cible; $btnAjout.Text = 'Modifier'
-        $tbAlias.Focus(); $tbAlias.SelectAll()
-        Set-Info "Modification de « $($p.Alias) » : change l'alias ou la cible, puis Entrée.  Échap : annuler"
-    }
-    function Remove-Selection {
-        $sel = @($liste.SelectedIndices | ForEach-Object { $st.vue[$_].Paire }); if (-not $sel.Count) { return }
-        foreach ($p in $sel) { $st.pairs.Remove($p) }
-        Save-Tout ("$($sel.Count) alias supprimé" + $(if ($sel.Count -gt 1) { 's' } else { '' }))
-    }
-
-    # Une ligne : icone, alias, appli ouverte ; selection arrondie avec un trait de couleur a gauche ; x pour supprimer au survol
-    $liste.Add_DrawItem({
-        param($s, $e)
-        if ($e.Index -lt 0 -or $e.Index -ge $st.vue.Count) { return }
-        $gr = $e.Graphics; $gr.SmoothingMode = 'AntiAlias'; $gr.TextRenderingHint = 'ClearTypeGridFit'
-        $gr.FillRectangle((New-Object Drawing.SolidBrush($cBg)), $e.Bounds)
-        $v = $st.vue[$e.Index]; $sel = ($e.State -band [Windows.Forms.DrawItemState]::Selected) -ne 0; $survol = $e.Index -eq $st.survol
-        $r = New-Object Drawing.Rectangle($e.Bounds.X, ($e.Bounds.Y + (px 2)), ($e.Bounds.Width - 1), ($e.Bounds.Height - (px 4)))
-        if ($sel -or $survol) {
-            $d = (px 8); $p = New-Object Drawing.Drawing2D.GraphicsPath
-            $p.AddArc($r.X, $r.Y, $d, $d, 180, 90); $p.AddArc($r.Right - $d, $r.Y, $d, $d, 270, 90); $p.AddArc($r.Right - $d, $r.Bottom - $d, $d, $d, 0, 90); $p.AddArc($r.X, $r.Bottom - $d, $d, $d, 90, 90); $p.CloseFigure()
-            $gr.FillPath((New-Object Drawing.SolidBrush($(if ($sel) { $cSel } else { [Drawing.Color]::FromArgb(40, 40, 40) }))), $p)
-            if ($sel) { $gr.FillRectangle((New-Object Drawing.SolidBrush($cAccent)), $r.X, ($r.Y + $r.Height / 2 - (px 8)), (px 3), (px 16)) }
-        }
-        $isz = (px 22); $x = $r.X + (px 14)
-        $b = if ($aIcone -and $v.Brut -and $v.Genre -ne 'introuvable') { Get-AppIcon $v.Brut } else { $null }
-        if ($b) { $gr.InterpolationMode = 'HighQualityBicubic'; $gr.DrawImage($b, $x, $r.Y + [int](($r.Height - $isz) / 2), $isz, $isz) }
-        elseif (-not $v.App) { [Windows.Forms.TextRenderer]::DrawText($gr, [string][char]0x2197, $font, (New-Object Drawing.Rectangle($x, $r.Y, $isz, $r.Height)), $cWarn, [Windows.Forms.TextFormatFlags]'VerticalCenter, HorizontalCenter') }
-        $x += $isz + (px 14)
-        $wAlias = (px 140)
-        $fl = [Windows.Forms.TextFormatFlags]'VerticalCenter, Left, SingleLine, EndEllipsis, NoPrefix'
-        [Windows.Forms.TextRenderer]::DrawText($gr, $v.Paire.Alias, $fontFort, (New-Object Drawing.Rectangle($x, $r.Y, ($wAlias - (px 8)), $r.Height)), $cTexte, $fl)
-        $x += $wAlias
-        $droite = $r.Right - $(if ($survol) { (px 40) } else { (px 12) })
-        $texte = if ($v.App) { $v.Nom + $(if ($v.App.Type -ne 'Appli') { "   ·  $($v.App.Type)" } else { '' }) } else { "$($v.Nom)   ·  $($v.Genre)" }
-        [Windows.Forms.TextRenderer]::DrawText($gr, $texte, $font, (New-Object Drawing.Rectangle($x, $r.Y, [Math]::Max(10, $droite - $x), $r.Height)), $(if ($v.Genre -eq 'introuvable') { $cWarn } else { $cDim }), $fl)
-        if ($survol) { [Windows.Forms.TextRenderer]::DrawText($gr, [string][char]0x2715, $font, (New-Object Drawing.Rectangle(($r.Right - (px 36)), $r.Y, (px 28), $r.Height)), $cDim, [Windows.Forms.TextFormatFlags]'VerticalCenter, HorizontalCenter') }
-    })
-    $liste.Add_MouseMove({
-        $i = $liste.IndexFromPoint($_.Location)
-        if ($i -ne $st.survol) { $st.survol = $i; $liste.Invalidate() }
-        $liste.Cursor = if ($i -ge 0 -and $_.X -gt $liste.ClientSize.Width - (px 40)) { 'Hand' } else { 'Default' }
-    })
-    $liste.Add_MouseLeave({ $st.survol = -1; $liste.Invalidate() })
-    $liste.Add_MouseUp({
-        $i = $liste.IndexFromPoint($_.Location)
-        if ($_.Button -eq 'Left' -and $i -ge 0 -and $_.X -gt $liste.ClientSize.Width - (px 40)) {   # clic sur x
-            $p = $st.vue[$i].Paire; $st.pairs.Remove($p); Save-Tout "« $($p.Alias) » supprimé"
-        }
-    })
-
-    # ---- Evenements ----
-    $filtre.Add_TextChanged({ Update-Liste })
-    $tbAlias.Add_KeyDown({ param($s, $e) if ($e.KeyCode -eq 'Return') { $e.SuppressKeyPress = $true; if ($tbCible.Text) { Add-Une } else { $tbCible.Focus() } } })
-    $tbCible.Add_KeyDown({ param($s, $e) if ($e.KeyCode -eq 'Return') { $e.SuppressKeyPress = $true; Add-Une } })
-    $btnAjout.Add_Click({ Add-Une })
-    $liste.Add_DoubleClick({ if ($liste.PointToClient([Windows.Forms.Control]::MousePosition).X -le $liste.ClientSize.Width - (px 40)) { Edit-Selection } })
-    $liste.Add_KeyDown({
-        param($s, $e)
-        if ($e.KeyCode -eq 'Delete') { Remove-Selection; $e.Handled = $true }
-        elseif ($e.KeyCode -eq 'F2' -or $e.KeyCode -eq 'Return') { Edit-Selection; $e.Handled = $true }
-        elseif ($e.Control -and $e.KeyCode -eq 'A') { for ($i = 0; $i -lt $liste.Items.Count; $i++) { $liste.SetSelected($i, $true) }; $e.Handled = $true }
-    })
-    $liste.Add_Resize({ $liste.Invalidate() })
-    $liste.Add_HandleCreated({ [LanceurCue]::Sombre($liste.Handle) })   # barre de defilement sombre
-    $f.Add_KeyDown({
-        param($s, $e)
-        if ($e.KeyCode -eq 'Escape') {
-            $e.SuppressKeyPress = $true
-            if ($st.edit -or $tbAlias.Text -or $tbCible.Text) { Reset-Ajout; Set-Info '' } else { $f.Close() }
-        } elseif ($e.Control -and $e.KeyCode -eq 'F') { $filtre.Focus(); $filtre.SelectAll(); $e.SuppressKeyPress = $true }
-    })
-    $f.Add_Shown({
-        if ($preset) { $tbCible.Text = $preset; Set-Info "Tape l'alias pour « $preset », puis Entrée." }
-        else { Set-Info "Tape l'alias, Entrée, puis l'appli, Entrée : c'est ajouté, tu enchaînes sur le suivant." }
-        $tbAlias.Focus()
-    })
-    Update-Liste
-    [void]$f.ShowDialog()
+# Chemin a coins arrondis (rayon r)
+function New-CheminArrondi([int]$w, [int]$h, [int]$r) {
+    $p = New-Object Drawing.Drawing2D.GraphicsPath
+    $p.AddArc(0, 0, $r * 2, $r * 2, 180, 90); $p.AddArc($w - $r * 2, 0, $r * 2, $r * 2, 270, 90)
+    $p.AddArc($w - $r * 2, $h - $r * 2, $r * 2, $r * 2, 0, 90); $p.AddArc(0, $h - $r * 2, $r * 2, $r * 2, 90, 90)
+    $p.CloseFigure(); $p
+}
+$aliasArrondir = {
+    $r = apx 6
+    if ($this.Width -lt $r * 2 -or $this.Height -lt $r * 2) { return }
+    $this.Region = New-Object Drawing.Region (New-CheminArrondi $this.Width $this.Height $r)
 }
 
-# Texte d'aide grise dans une case vide (EM_SETCUEBANNER), barre de titre sombre et coins arrondis (Windows 11)
+# ---- Briques ----
+function New-AliasBouton([string]$texte, $fond, $survol) {
+    $b = New-Object Windows.Forms.Button
+    $b.Text = $texte; $b.FlatStyle = 'Flat'; $b.FlatAppearance.BorderSize = 0
+    $b.BackColor = $fond; $b.FlatAppearance.MouseOverBackColor = $survol; $b.FlatAppearance.MouseDownBackColor = $survol
+    $b.ForeColor = [Drawing.Color]::White; $b.Cursor = 'Hand'; $b.Add_Resize($aliasArrondir)
+    $b
+}
+# Champ : zone de texte sans bordure dans un panneau arrondi, centree verticalement
+function New-AliasChamp {
+    $p = New-Object Windows.Forms.Panel
+    $p.Dock = 'Fill'; $p.BackColor = $aliasCouleurs.Champ; $p.Margin = New-Object Windows.Forms.Padding(0, 0, (apx 8), 0); $p.Cursor = 'IBeam'
+    $t = New-Object Windows.Forms.TextBox
+    $t.BorderStyle = 'None'; $t.BackColor = $aliasCouleurs.Champ; $t.ForeColor = $aliasCouleurs.Texte; $t.Font = $aliasPolice
+    $p.Controls.Add($t)
+    $p.Add_Resize({ $tb = $this.Controls[0]; $tb.SetBounds((apx 10), [int](($this.Height - $tb.Height) / 2), $this.Width - (apx 20), $tb.Height) })
+    $p.Add_Resize($aliasArrondir)
+    $p.Add_Click({ $this.Controls[0].Focus() })
+    $p
+}
+function New-AliasEntete {
+    $head = New-Object Windows.Forms.Panel
+    $head.Dock = 'Top'; $head.Height = apx 82; $head.Padding = New-Object Windows.Forms.Padding((apx 20), (apx 16), (apx 20), 0)
+    $sous = New-Object Windows.Forms.Label
+    $sous.Dock = 'Top'; $sous.Height = apx 24; $sous.ForeColor = $aliasCouleurs.Discret; $sous.Font = New-Object Drawing.Font('Segoe UI', 9.5)
+    $sous.Text = 'Tape un alias dans la barre pour ouvrir sa cible : une appli, un dossier, une URL ou une commande.'
+    $titre = New-Object Windows.Forms.Label
+    $titre.Dock = 'Top'; $titre.Height = apx 34; $titre.Text = 'Alias'; $titre.ForeColor = [Drawing.Color]::White
+    $titre.Font = New-Object Drawing.Font('Segoe UI Semibold', 16)
+    $head.Controls.AddRange(@($sous, $titre))
+    $head
+}
+# Ligne d'ajout : [alias] [cible] [Ajouter]
+function New-AliasLigneAjout {
+    $row = New-Object Windows.Forms.TableLayoutPanel
+    $row.Dock = 'Top'; $row.Height = apx 58; $row.Padding = New-Object Windows.Forms.Padding((apx 20), (apx 8), (apx 20), (apx 10))
+    $row.ColumnCount = 3; $row.RowCount = 1
+    [void]$row.ColumnStyles.Add((New-Object Windows.Forms.ColumnStyle('Percent', 30)))
+    [void]$row.ColumnStyles.Add((New-Object Windows.Forms.ColumnStyle('Percent', 70)))
+    [void]$row.ColumnStyles.Add((New-Object Windows.Forms.ColumnStyle('Absolute', (apx 96))))
+    [void]$row.RowStyles.Add((New-Object Windows.Forms.RowStyle('Percent', 100)))
+    $chAlias = New-AliasChamp; $chCible = New-AliasChamp
+    $btn = New-AliasBouton 'Ajouter' $aliasCouleurs.Accent $aliasCouleurs.AccentSurvol
+    $btn.Dock = 'Fill'; $btn.Margin = New-Object Windows.Forms.Padding(0)
+    $row.Controls.Add($chAlias, 0, 0); $row.Controls.Add($chCible, 1, 0); $row.Controls.Add($btn, 2, 0)
+    @{ Panel = $row; Alias = $chAlias.Controls[0]; Cible = $chCible.Controls[0]; Ajouter = $btn }
+}
+function New-AliasGrille {
+    $grid = New-Object Windows.Forms.DataGridView
+    $grid.Dock = 'Fill'; $grid.BackgroundColor = $aliasCouleurs.Fond; $grid.BorderStyle = 'None'; $grid.GridColor = $aliasCouleurs.Ligne
+    $grid.CellBorderStyle = 'SingleHorizontal'; $grid.RowHeadersVisible = $false
+    $grid.AllowUserToAddRows = $false; $grid.AllowUserToDeleteRows = $false; $grid.AllowUserToResizeRows = $false
+    $grid.SelectionMode = 'FullRowSelect'; $grid.MultiSelect = $false; $grid.AutoSizeColumnsMode = 'Fill'
+    $grid.EnableHeadersVisualStyles = $false; $grid.ColumnHeadersBorderStyle = 'None'
+    $grid.ColumnHeadersHeightSizeMode = 'DisableResizing'; $grid.ColumnHeadersHeight = apx 32
+    $grid.RowTemplate.Height = apx 42; $grid.EditMode = 'EditProgrammatically'
+    $c = $grid.DefaultCellStyle
+    $c.BackColor = $aliasCouleurs.Fond; $c.ForeColor = $aliasCouleurs.Texte; $c.Font = $aliasPolice
+    $c.SelectionBackColor = $aliasCouleurs.LigneSel; $c.SelectionForeColor = [Drawing.Color]::White
+    $c.Padding = New-Object Windows.Forms.Padding((apx 4), 0, 0, 0)
+    $h = $grid.ColumnHeadersDefaultCellStyle
+    $h.BackColor = $aliasCouleurs.Fond; $h.ForeColor = $aliasCouleurs.Discret; $h.SelectionBackColor = $aliasCouleurs.Fond
+    $h.Font = New-Object Drawing.Font('Segoe UI', 9); $h.Padding = New-Object Windows.Forms.Padding((apx 4), 0, 0, 0)
+    # Colonnes : icone, alias, cible, croix
+    $icon = New-Object Windows.Forms.DataGridViewImageColumn
+    $icon.HeaderText = ''; $icon.AutoSizeMode = 'None'; $icon.Width = apx 46; $icon.ImageLayout = 'Zoom'; $icon.ReadOnly = $true
+    $icon.DefaultCellStyle.Padding = New-Object Windows.Forms.Padding((apx 14), (apx 11), (apx 4), (apx 11)); $icon.DefaultCellStyle.NullValue = $aliasVide
+    $alias = New-Object Windows.Forms.DataGridViewTextBoxColumn
+    $alias.HeaderText = 'ALIAS'; $alias.FillWeight = 30
+    $alias.DefaultCellStyle.ForeColor = $aliasCouleurs.Alias; $alias.DefaultCellStyle.SelectionForeColor = $aliasCouleurs.Alias
+    $alias.DefaultCellStyle.Font = New-Object Drawing.Font('Segoe UI Semibold', 10)
+    $cible = New-Object Windows.Forms.DataGridViewTextBoxColumn
+    $cible.HeaderText = 'CIBLE'; $cible.FillWeight = 70
+    $del = New-Object Windows.Forms.DataGridViewTextBoxColumn
+    $del.HeaderText = ''; $del.AutoSizeMode = 'None'; $del.Width = apx 46; $del.ReadOnly = $true
+    $del.DefaultCellStyle.Alignment = 'MiddleCenter'; $del.DefaultCellStyle.ForeColor = $aliasCouleurs.Discret; $del.DefaultCellStyle.SelectionForeColor = $aliasCouleurs.Discret
+    $grid.Columns.AddRange([Windows.Forms.DataGridViewColumn[]]@($icon, $alias, $cible, $del))
+    foreach ($col in $grid.Columns) { $col.SortMode = 'NotSortable'; $col.Resizable = 'False' }
+    $grid
+}
+function New-AliasMessageVide {
+    $l = New-Object Windows.Forms.Label
+    $l.Dock = 'Fill'; $l.TextAlign = 'MiddleCenter'; $l.ForeColor = $aliasCouleurs.Discret; $l.BackColor = $aliasCouleurs.Fond
+    $l.Text = "Aucun alias pour l'instant.`nAjoute-en un ci-dessus, par exemple  ch  " + [char]0x2192 + "  Google Chrome."
+    $l
+}
+# Pied : "Ouvrir alias.txt" a gauche, Termine a droite
+function New-AliasPied {
+    $foot = New-Object Windows.Forms.Panel
+    $foot.Dock = 'Bottom'; $foot.Height = apx 60; $foot.Padding = New-Object Windows.Forms.Padding((apx 20), (apx 12), (apx 20), (apx 14))
+    $fini = New-AliasBouton 'Terminé' $aliasCouleurs.Champ $aliasCouleurs.ChampSurvol
+    $fini.Dock = 'Right'; $fini.Width = apx 96
+    $ouvrir = New-Object Windows.Forms.LinkLabel
+    $ouvrir.Dock = 'Left'; $ouvrir.AutoSize = $false; $ouvrir.Width = apx 200; $ouvrir.TextAlign = 'MiddleLeft'; $ouvrir.Text = 'Ouvrir alias.txt'
+    $ouvrir.LinkColor = $aliasCouleurs.Discret; $ouvrir.ActiveLinkColor = [Drawing.Color]::White; $ouvrir.LinkBehavior = 'HoverUnderline'
+    $foot.Controls.AddRange(@($fini, $ouvrir))
+    @{ Panel = $foot; Fini = $fini; Ouvrir = $ouvrir }
+}
+
+# ---- Comportement ----
+# Icone d'un alias : celle de l'appli, du dossier, du fichier ou du programme qu'il ouvre
+function Get-AliasIcone([string]$alias) {
+    if (-not (Get-Command Get-AppIcon -ErrorAction SilentlyContinue)) { return $aliasVide }
+    $k = ConvertTo-Key $alias
+    foreach ($a in $script:apps) { if ($a.Aliases -contains $k) { $img = Get-AppIcon $a; if ($img) { return $img } else { break } } }
+    $aliasVide
+}
+# Cible introuvable (ni appli, ni chemin, ni URL, ni programme) : en orange
+function Test-AliasCible([string]$c) {
+    $a = Resolve-Cible $c; if ($a -and $a.Type -ne 'Commande') { return $true }
+    $x = [Environment]::ExpandEnvironmentVariables($c.Trim())
+    if ($x -match '^[a-z][a-z0-9+.-]*:' -and $x -notmatch '^[a-z]:\\') { return $true }   # URL, ms-settings:, mailto:...
+    if ($x -match '^www\.') { return $true }
+    if (Test-Path -LiteralPath $x -ErrorAction SilentlyContinue) { return $true }
+    [bool](Get-Command ($x -split ' ')[0] -CommandType Application -ErrorAction SilentlyContinue)
+}
+function Set-AliasLigneEtat($r) {
+    $ok = Test-AliasCible "$($r.Cells[2].Value)"
+    $col = if ($ok) { $aliasCouleurs.Texte } else { $aliasCouleurs.Attention }
+    $r.Cells[2].Style.ForeColor = $col; $r.Cells[2].Style.SelectionForeColor = $col
+    $r.Cells[2].ToolTipText = if ($ok) { '' } else { 'Cible introuvable : ni appli, ni dossier, ni fichier, ni URL, ni programme' }
+}
+function Import-AliasGrille {
+    $grid.Rows.Clear()
+    foreach ($p in (Get-AliasPairs)) { $i = $grid.Rows.Add((Get-AliasIcone $p.Alias), $p.Alias, $p.Cible, $aliasCroix); Set-AliasLigneEtat $grid.Rows[$i] }
+    $grid.ClearSelection(); $vide.Visible = $grid.Rows.Count -eq 0
+    $script:aliasFenStamp = (Get-Item $aliasFile).LastWriteTime
+}
+# Enregistre la grille dans alias.txt et applique les alias tout de suite (~30 ms, sans relire le menu Demarrer)
+function Save-AliasGrille {
+    $pairs = New-Object Collections.ArrayList
+    foreach ($r in $grid.Rows) { [void]$pairs.Add([pscustomobject]@{ Alias = "$($r.Cells[1].Value)"; Cible = "$($r.Cells[2].Value)" }) }
+    Save-AliasPairs $pairs
+    foreach ($r in $grid.Rows) { $r.Cells[0].Value = Get-AliasIcone "$($r.Cells[1].Value)"; Set-AliasLigneEtat $r }
+    $vide.Visible = $grid.Rows.Count -eq 0
+    $script:aliasFenStamp = (Get-Item $aliasFile).LastWriteTime
+}
+# L'alias tape en haut : ajoute (remplace un alias du meme nom), puis selectionne
+function Add-AliasLigne {
+    $a = $aliasBox.Text.Trim(); $t = $cibleBox.Text.Trim()
+    if (-not $a) { $aliasBox.Focus(); return }
+    if ($a.Contains('=')) { $aliasBox.SelectAll(); $aliasBox.Focus(); return }
+    if (-not $t) { $cibleBox.Focus(); return }
+    $k = ConvertTo-Key $a
+    foreach ($r in @($grid.Rows)) { if ((ConvertTo-Key "$($r.Cells[1].Value)") -eq $k) { $grid.Rows.Remove($r) } }
+    $i = $grid.Rows.Add($aliasVide, $a, $t, $aliasCroix)
+    Save-AliasGrille
+    $aliasBox.Text = ''; $cibleBox.Text = ''; $aliasBox.Focus()
+    $grid.ClearSelection(); $grid.Rows[$i].Selected = $true; $grid.FirstDisplayedScrollingRowIndex = $i
+}
+# Fin de modification : alias ou cible vide = ligne supprimee (juste apres la fin de l'edition), sinon enregistree
+function Complete-AliasEdition([int]$row) {
+    $r = $grid.Rows[$row]
+    if (-not "$($r.Cells[1].Value)".Trim() -or -not "$($r.Cells[2].Value)".Trim()) {
+        $script:aliasLigneASupprimer = $r
+        $grid.BeginInvoke([Action]{ $grid.Rows.Remove($script:aliasLigneASupprimer); $script:aliasLigneASupprimer = $null; Save-AliasGrille }) | Out-Null
+    } else { Save-AliasGrille }
+}
+# Colonne croix : rouge au survol, supprime au clic
+function Set-AliasCroixSurvol([int]$row, [bool]$on) {
+    $c = $grid.Rows[$row].Cells[3]
+    $col = if ($on) { $aliasCouleurs.Suppr } else { $aliasCouleurs.Discret }
+    $c.Style.ForeColor = $col; $c.Style.SelectionForeColor = $col
+    $grid.Cursor = if ($on) { 'Hand' } else { 'Default' }
+}
+# Echap : vide d'abord le champ en cours, ferme la fenetre quand il est vide
+function Undo-AliasChamp {
+    $tb = $f.ActiveControl -as [Windows.Forms.TextBox]
+    if ($tb -and $tb.Text) { $tb.Text = '' } else { $f.Close() }
+}
+function Register-AliasEvenements {
+    $ligne.Ajouter.Add_Click({ Add-AliasLigne })
+    $entree = { param($s, $e) if ($e.KeyCode -eq 'Return') { $e.SuppressKeyPress = $true; Add-AliasLigne } }
+    $aliasBox.Add_KeyDown($entree); $cibleBox.Add_KeyDown($entree)
+
+    $grid.Add_CellDoubleClick({ param($s, $e) if ($e.RowIndex -ge 0 -and $e.ColumnIndex -in 1, 2) { $grid.BeginEdit($true) } })
+    $grid.Add_KeyDown({ param($s, $e)
+        if ($e.KeyCode -eq 'F2' -and $grid.CurrentCell -and $grid.CurrentCell.ColumnIndex -in 1, 2) { $grid.BeginEdit($true); $e.Handled = $true }
+        elseif ($e.KeyCode -eq 'Delete' -and $grid.CurrentRow) { $grid.Rows.Remove($grid.CurrentRow); Save-AliasGrille; $e.Handled = $true }
+    })
+    $grid.Add_CellEndEdit({ param($s, $e) Complete-AliasEdition $e.RowIndex })
+    $grid.Add_EditingControlShowing({ param($s, $e)
+        $tb = $e.Control -as [Windows.Forms.TextBox]; if (-not $tb) { return }
+        $tb.BackColor = $aliasCouleurs.Champ; $tb.ForeColor = $aliasCouleurs.Texte; $tb.AutoCompleteMode = 'None'
+    })
+    $grid.Add_CellMouseEnter({ param($s, $e) if ($e.RowIndex -ge 0 -and $e.ColumnIndex -eq 3) { Set-AliasCroixSurvol $e.RowIndex $true } })
+    $grid.Add_CellMouseLeave({ param($s, $e) if ($e.RowIndex -ge 0 -and $e.ColumnIndex -eq 3) { Set-AliasCroixSurvol $e.RowIndex $false } })
+    $grid.Add_CellClick({ param($s, $e) if ($e.RowIndex -ge 0 -and $e.ColumnIndex -eq 3) { $grid.Rows.RemoveAt($e.RowIndex); $grid.Cursor = 'Default'; Save-AliasGrille } })
+
+    $pied.Ouvrir.Add_LinkClicked({ Start-Process notepad.exe "`"$aliasFile`"" })
+    $pied.Fini.Add_Click({ $f.Close() })
+    $f.Add_KeyDown({ param($s, $e)
+        if ($e.KeyCode -ne 'Escape' -or $grid.IsCurrentCellInEditMode) { return }
+        $e.SuppressKeyPress = $true
+        Undo-AliasChamp
+    })
+    # alias.txt modifie a la main pendant ce temps : on recharge
+    $f.Add_Activated({ if ((Get-Item $aliasFile).LastWriteTime -ne $script:aliasFenStamp) { Update-Aliases; Import-AliasGrille } })
+    $f.Add_Shown({
+        [void][LanceurCue]::Set($aliasBox.Handle, 'Alias'); [void][LanceurCue]::Set($cibleBox.Handle, 'Appli, dossier, URL ou commande')
+        foreach ($c in $grid.Controls) { [LanceurCue]::Sombre($c.Handle) }
+        if ($preset) { $cibleBox.Text = $preset }
+        $f.Activate(); $aliasBox.Focus()
+        # ShowDialog a desactive la barre : on la reactive pour pouvoir essayer un nouvel alias tout de suite
+        foreach ($nom in 'bar', 'pop') { $w = Get-Variable -Name $nom -Scope Script -ValueOnly -ErrorAction SilentlyContinue; if ($w -is [Windows.Forms.Form]) { [LanceurCue]::Activer($w.Handle) } }
+    })
+}
+
+# ---- La fenetre ----
+# $preset : nom d'une appli a pre-remplir comme cible
+function Show-AliasManager([string]$preset) {
+    # Deja ouverte (":alias" retape...) : on la ramene devant au lieu d'en ouvrir une autre
+    if ($script:aliasFen -and $script:aliasFen.Visible) {
+        if ($preset) { $script:aliasFenCible.Text = $preset; $script:aliasFenAlias.Focus() }
+        $script:aliasFen.Activate(); return
+    }
+    $script:aliasK = Get-AliasEchelle
+    $f = New-Object Windows.Forms.Form
+    $f.Text = 'Alias'; $f.ShowIcon = $false; $f.KeyPreview = $true
+    $f.StartPosition = 'CenterScreen'; $f.AutoScaleMode = 'None'
+    $f.Size = New-Object Drawing.Size((apx 640), (apx 560)); $f.MinimumSize = New-Object Drawing.Size((apx 460), (apx 360))
+    $f.BackColor = $aliasCouleurs.Fond; $f.ForeColor = $aliasCouleurs.Texte; $f.Font = $aliasPolice
+    $ligne = New-AliasLigneAjout
+    $aliasBox = $ligne.Alias; $cibleBox = $ligne.Cible
+    $grid = New-AliasGrille
+    $vide = New-AliasMessageVide
+    $hote = New-Object Windows.Forms.Panel
+    $hote.Dock = 'Fill'; $hote.Padding = New-Object Windows.Forms.Padding((apx 20), 0, (apx 20), 0)
+    $hote.Controls.AddRange(@($grid, $vide))
+    $pied = New-AliasPied
+    $f.Controls.AddRange(@($hote, $ligne.Panel, (New-AliasEntete), $pied.Panel))   # Fill en premier : ancre en dernier, prend la place restante
+    Register-AliasEvenements
+    Copy-Item $aliasFile "$aliasFile.bak" -Force -ErrorAction SilentlyContinue   # filet de securite
+    Update-AppsIfStale
+    Import-AliasGrille
+    [void]$f.Handle; [LanceurCue]::Style($f.Handle)
+    $script:aliasFen = $f; $script:aliasFenCible = $cibleBox; $script:aliasFenAlias = $aliasBox
+    try { [void]$f.ShowDialog((New-Object LanceurBureau)) } finally { $script:aliasFen = $null }
+}
+
+# Texte d'aide grise (EM_SETCUEBANNER), barre de titre sombre et coins arrondis, barres de defilement sombres,
+# reactivation d'une fenetre, et proprietaire "bureau" (la fenetre des alias ne bloque pas la barre)
 if (-not ('LanceurCue' -as [type])) {
-    Add-Type -TypeDefinition @'
-using System; using System.Runtime.InteropServices;
+    Add-Type -ReferencedAssemblies System.Windows.Forms -TypeDefinition @'
+using System; using System.Runtime.InteropServices; using System.Windows.Forms;
 public static class LanceurCue {
     [DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern IntPtr SendMessage(IntPtr h, int msg, IntPtr w, string l);
     [DllImport("dwmapi.dll")] static extern int DwmSetWindowAttribute(IntPtr h, int attr, ref int val, int size);
-    public static bool Set(IntPtr box, string text) { SendMessage(box, 0x1501, new IntPtr(1), text ?? ""); return true; }
     [DllImport("uxtheme.dll", CharSet = CharSet.Unicode)] static extern int SetWindowTheme(IntPtr h, string app, string ids);
+    [DllImport("user32.dll")] static extern bool EnableWindow(IntPtr h, bool on);
+    public static bool Set(IntPtr box, string text) { SendMessage(box, 0x1501, new IntPtr(1), text ?? ""); return true; }
     public static void Sombre(IntPtr h) { SetWindowTheme(h, "DarkMode_Explorer", null); }
+    public static void Activer(IntPtr h) { EnableWindow(h, true); }
     public static void Style(IntPtr h) {
-        int on = 1; DwmSetWindowAttribute(h, 20, ref on, 4);        // DWMWA_USE_IMMERSIVE_DARK_MODE
-        int round = 2; DwmSetWindowAttribute(h, 33, ref round, 4);  // DWMWA_WINDOW_CORNER_PREFERENCE = arrondi
+        int on = 1; if (DwmSetWindowAttribute(h, 20, ref on, 4) != 0) DwmSetWindowAttribute(h, 19, ref on, 4);   // barre de titre sombre
+        int round = 2; DwmSetWindowAttribute(h, 33, ref round, 4);                                              // coins arrondis (Windows 11)
     }
+}
+public class LanceurBureau : IWin32Window {
+    [DllImport("user32.dll")] static extern IntPtr GetDesktopWindow();
+    public IntPtr Handle { get { return GetDesktopWindow(); } }
 }
 '@
 }

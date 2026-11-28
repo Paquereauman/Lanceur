@@ -20,11 +20,11 @@ PowerShell 5.1 that ships with Windows. The interface is in French.
 - **Learns what you use**: frequently launched apps move to the top.
 - **Aliases**: type `ch=chrome` then Enter, and `ch` now launches Google Chrome.
   Right-click a suggestion → *Donner un alias à cette appli*, or type `:alias` to open the alias manager.
-- **Alias manager** (`:alias`, or right-click the bar → *Gérer les alias...*), Windows 11 style (dark title bar,
-  rounded corners): type the alias, Enter, type the app, Enter — it's added and you go on with the next one.
-  Search (Ctrl+F), edit (double-click or F2), delete with Del or the × shown on hover. Each target is labelled
-  (app, folder, file, web site, command) and unknown targets show in orange. Every change is saved at once and the
-  bar uses it immediately (~30 ms); the file as it was when the window opened is kept as `alias.txt.bak`.
+- **Alias manager** (`:alias`, or right-click the bar → *Gérer les alias...*), same design as basedhound's:
+  add at the top (Enter), double-click (or F2) an alias or a target to edit it in place, delete with the × (red on
+  hover) or Del. Targets that lead nowhere show in orange. Changes are saved instantly, and the bar stays usable
+  while the window is open, so a new alias can be tried right away. Typing `:alias` again brings the open window
+  forward; `alias.txt` edited by hand meanwhile is reloaded (*Ouvrir alias.txt* link at the bottom).
 - **Your own shortcuts**: drop any `.lnk`, `.url`, `.exe` or document into the `raccourcis` folder
   (right-click the bar → *Ouvrir le dossier des raccourcis*) and it shows up under its file name.
   Put them in subfolders to sort them: `raccourcis\Travail\Compta.lnk` is tagged *Travail*, and typing
