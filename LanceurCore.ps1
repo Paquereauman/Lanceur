@@ -338,6 +338,18 @@ function Resolve-Cible([string]$cible, $list = $script:baseApps, $parNom = $scri
     $best
 }
 
+# Nom lisible d'un site vise par une cible (URL, ou navigateur suivi d'une URL) : www.youtube.com -> YouTube,
+# gemini.google.com -> Gemini, www.allkeyshop.com -> Allkeyshop. $null si la cible n'est pas un site.
+$nomsConnus = @{ 'youtube' = 'YouTube'; 'github' = 'GitHub'; 'chatgpt' = 'ChatGPT'; 'linkedin' = 'LinkedIn'; 'deepseek' = 'DeepSeek'; 'allkeyshop' = 'AllKeyShop' }
+function Get-NomSite([string]$cible) {
+    $prog, $arg = Split-Commande $cible
+    $u = if ($prog -match '^https?://') { $prog } elseif ($arg -match '^(https?://\S+)') { $Matches[1] } else { return $null }
+    try { $h = ([uri]$u).Host -replace '^www\d*\.', '' } catch { return $null }
+    $mot = ($h -split '\.')[0]; if (-not $mot) { return $null }
+    if ($nomsConnus[$mot]) { return $nomsConnus[$mot] }
+    $mot.Substring(0, 1).ToUpper() + $mot.Substring(1)
+}
+
 # Applique alias.txt a la liste des applis deja chargee (sans relire le menu Demarrer ni le Panneau de configuration)
 function Update-Aliases {
     $list = New-Object Collections.ArrayList
@@ -348,7 +360,12 @@ function Update-Aliases {
         $app = Resolve-Cible $p.Cible $script:baseApps $parNom
         if (-not $app) {
             if ($parNom.ContainsKey($p.Cible)) { $app = $parNom[$p.Cible] }
-            else { $app = New-Entree $p.Cible $p.Cible 'Commande' $p.Cible; [void]$list.Add($app); $parNom[$p.Cible] = $app }
+            else {
+                # Un site s'affiche sous son nom ("YouTube"), pas sous son adresse ni le chemin du navigateur
+                $nom = Get-NomSite $p.Cible; if (-not $nom) { $nom = $p.Cible }
+                $app = New-Entree $nom $p.Cible $(if ($nom -ne $p.Cible) { 'Site' } else { 'Commande' }) $p.Cible
+                [void]$list.Add($app); $parNom[$p.Cible] = $app
+            }
         }
         $app.Aliases += (ConvertTo-Key $p.Alias)
     }
